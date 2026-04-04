@@ -1,0 +1,1396 @@
+import { useEffect, useRef, useState } from 'react'
+import { Button } from './components/ui/Button'
+import { Card } from './components/ui/Card'
+import { Input } from './components/ui/Input'
+import { Modal } from './components/ui/Modal'
+import './App.css'
+
+type ChatSession = {
+  id: string
+  title: string
+  updatedAt: string
+  isDraft: boolean
+}
+
+type ChatMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  isLoading?: boolean
+  isError?: boolean
+  topKCitations?: RecallChunk[]
+  topNCitations?: RecallChunk[]
+}
+
+type SessionError = {
+  failedQuery: string
+  message: string
+}
+
+type QueryMode = 'none' | 'vector' | 'hybrid' | 'hybrid_rerank'
+
+type BuildForm = {
+  knowledgeBaseName: string
+  chunkSize: number
+  chunkOverlap: number
+}
+
+type KnowledgeBaseConfig = BuildForm & {
+  files: string[]
+}
+
+type RecallChannel = 'Vector' | 'BM25' | 'Rerank'
+
+type RecallChunk = {
+  id: string
+  title: string
+  source: string
+  score: number
+  content: string
+  hitMode: string
+  channel: RecallChannel
+}
+
+type SessionRecallState = {
+  queryMode: QueryMode
+  topN: number
+  topK: number
+  advancedOpen: boolean
+  initialExpanded: boolean
+  queryInput: string
+  lastQuery: string
+  isLoading: boolean
+  initialResults: RecallChunk[]
+  rerankedResults: RecallChunk[]
+}
+
+const buildStages = ['上传完成', '切分中', '索引构建中', '向量库构建中'] as const
+
+const initialSessions: ChatSession[] = [
+  {
+    id: 'session-1',
+    title: 'Agentic RAG 方案讨论',
+    updatedAt: '今天 10:26',
+    isDraft: false,
+  },
+  {
+    id: 'session-2',
+    title: 'LlamaIndex 索引调优',
+    updatedAt: '今天 09:41',
+    isDraft: false,
+  },
+  {
+    id: 'session-3',
+    title: 'LangChain Agent 工具编排',
+    updatedAt: '昨天 21:18',
+    isDraft: false,
+  },
+]
+
+const initialMessages: Record<string, ChatMessage[]> = {
+  'session-1': [
+    {
+      id: 'msg-1',
+      role: 'assistant',
+      content: '你好，我可以帮你分析 Agentic RAG 的架构与前端规划。',
+    },
+  ],
+  'session-2': [
+    {
+      id: 'msg-2',
+      role: 'assistant',
+      content: '已进入索引调优会话，你可以继续提问 chunk 与召回参数。',
+    },
+  ],
+  'session-3': [
+    {
+      id: 'msg-3',
+      role: 'assistant',
+      content: '这里是 Agent 工具编排会话，可继续讨论 LangChain 工具调用流。',
+    },
+  ],
+}
+
+const defaultBuildForm: BuildForm = {
+  knowledgeBaseName: '',
+  chunkSize: 1024,
+  chunkOverlap: 100,
+}
+
+const defaultSessionRecallState: SessionRecallState = {
+  queryMode: 'hybrid_rerank',
+  topN: 20,
+  topK: 3,
+  advancedOpen: true,
+  initialExpanded: false,
+  queryInput: '',
+  lastQuery: '',
+  isLoading: false,
+  initialResults: [],
+  rerankedResults: [],
+}
+
+function getNowLabel() {
+  const now = new Date()
+  const hh = String(now.getHours()).padStart(2, '0')
+  const mm = String(now.getMinutes()).padStart(2, '0')
+  return `今天 ${hh}:${mm}`
+}
+
+function truncateTitle(text: string) {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  return normalized.length > 20 ? `${normalized.slice(0, 20)}...` : normalized
+}
+
+function buildAssistantReply(query: string) {
+  if (/失败|error|异常/i.test(query)) {
+    throw new Error('网络波动导致本次响应失败，请稍后重试。')
+  }
+
+  return `已收到你的问题：「${query}」。Phase 2 当前为前端本地模拟回复，后续 Phase 3/4 将接入真实 RAG 与召回链路。`
+}
+
+function getQueryModeLabel(mode: QueryMode) {
+  if (mode === 'none') return '不使用知识库'
+  if (mode === 'vector') return '仅向量检索'
+  if (mode === 'hybrid') return '向量 + BM25'
+  return '向量 + BM25 + 精排'
+}
+
+function truncateText(text: string, maxLength: number) {
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+}
+
+function createMockRecallResults(
+  query: string,
+  mode: QueryMode,
+  topN: number,
+  topK: number,
+) {
+  const seedContents = [
+    {
+      title: 'Agentic RAG 入门指南',
+      source: 'Agentic-RAG-Guide.md',
+      content:
+        'Agentic RAG 将检索增强生成与代理式规划结合。系统先进行第一阶段召回，得到候选片段池，再通过重排模型筛选最相关上下文，最后由生成模型综合作答。该模式在复杂问答、多轮追问与工具调用场景中更稳定。',
+    },
+    {
+      title: 'LlamaIndex 检索实践',
+      source: 'LlamaIndex-Retrieval.md',
+      content:
+        '在 LlamaIndex 体系中，索引构建与查询时检索策略可以分离配置。常见做法是通过 chunk size 与 overlap 平衡召回覆盖和噪声，再结合向量召回与 BM25 混合检索扩展候选集合，并在第二阶段引入 cross-encoder 重排。',
+    },
+    {
+      title: 'LangChain Agent 工具调用',
+      source: 'LangChain-Agent-Tooling.md',
+      content:
+        'LangChain Agent 可将 LlamaIndex 的 query engine 封装为工具，在规划阶段按用户问题动态调用。对前端而言，建议显式展示“召回候选”与“最终重排结果”，帮助用户理解模型如何引用知识库内容并形成可追溯回答链路。',
+    },
+  ]
+
+  const initial: RecallChunk[] = Array.from({ length: topN }).map((_, index) => {
+    const base = seedContents[index % seedContents.length]
+    const channel: RecallChannel = mode === 'hybrid' || mode === 'hybrid_rerank'
+      ? (index % 2 === 0 ? 'Vector' : 'BM25')
+      : 'Vector'
+    const score = Number((0.92 - index * 0.012).toFixed(2))
+
+    return {
+      id: `initial-${index + 1}`,
+      title: `文档片段${index + 1} · ${base.title}`,
+      source: base.source,
+      score: score < 0.2 ? 0.2 : score,
+      content: `${base.content}（测试查询：${query}）`,
+      hitMode: channel,
+      channel,
+    }
+  })
+
+  const reranked = mode === 'hybrid_rerank'
+    ? [...initial]
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK)
+        .map((item, index) => ({
+          ...item,
+          id: `rerank-${index + 1}`,
+          score: Number((item.score + 0.03).toFixed(2)),
+          channel: 'Rerank' as const,
+          hitMode: `Rerank（来自 ${item.hitMode}）`,
+        }))
+    : [...initial]
+        .slice(0, topK)
+        .map((item, index) => ({
+          ...item,
+          id: `final-${index + 1}`,
+          hitMode: item.hitMode,
+        }))
+
+  return { initial, reranked }
+}
+
+function validateBuildForm(form: BuildForm) {
+  if (!form.knowledgeBaseName.trim()) {
+    return '知识库名称为必填项。'
+  }
+  if (form.knowledgeBaseName.trim().length < 2 || form.knowledgeBaseName.trim().length > 50) {
+    return '知识库名称长度需在 2-50 字符之间。'
+  }
+  if (form.chunkSize < 256 || form.chunkSize > 4096) {
+    return 'Chunk Size 需在 256-4096 之间。'
+  }
+  if (form.chunkOverlap < 0 || form.chunkOverlap > 512) {
+    return 'Chunk Overlap 需在 0-512 之间。'
+  }
+  if (form.chunkOverlap >= form.chunkSize) {
+    return 'Chunk Overlap 必须小于 Chunk Size。'
+  }
+
+  return ''
+}
+
+function createInitialKnowledgeBaseState() {
+  return Object.fromEntries(initialSessions.map((session) => [session.id, null as KnowledgeBaseConfig | null]))
+}
+
+function createInitialRecallState() {
+  return Object.fromEntries(
+    initialSessions.map((session) => [session.id, { ...defaultSessionRecallState }]),
+  ) as Record<string, SessionRecallState>
+}
+
+function buildCitedReply(
+  baseReply: string,
+  mode: QueryMode,
+  topN: number,
+  topK: number,
+  citations: RecallChunk[],
+) {
+  if (mode === 'none' || citations.length === 0) {
+    return `${baseReply}\n\n本次模式：不使用知识库（纯生成回答）。`
+  }
+
+  const markers = citations.slice(0, 3).map((_, index) => `[${index + 1}]`).join('')
+
+  return `${baseReply}\n\n本次模式：${getQueryModeLabel(mode)}（Top-N=${topN}, Top-K=${topK}）。\n\n引用标记：${markers}`
+}
+
+function App() {
+  const [sessions, setSessions] = useState<ChatSession[]>(initialSessions)
+  const [activeSessionId, setActiveSessionId] = useState(initialSessions[0].id)
+  const [messagesBySession, setMessagesBySession] =
+    useState<Record<string, ChatMessage[]>>(initialMessages)
+  const [queryInput, setQueryInput] = useState('')
+  const [sendingSessionId, setSendingSessionId] = useState<string | null>(null)
+  const [sessionErrorMap, setSessionErrorMap] = useState<Record<string, SessionError | undefined>>({})
+  const [searchKeyword, setSearchKeyword] = useState('')
+  const [deleteTarget, setDeleteTarget] = useState<ChatSession | null>(null)
+  const [deleteKnowledgeBaseConfirmOpen, setDeleteKnowledgeBaseConfirmOpen] = useState(false)
+  const [showUploadWizard, setShowUploadWizard] = useState(false)
+  const [uploadWizardMode, setUploadWizardMode] = useState<'create' | 'append'>('create')
+  const [uploadStep, setUploadStep] = useState<'upload' | 'config'>('upload')
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [buildForm, setBuildForm] = useState<BuildForm>(defaultBuildForm)
+  const [buildFormError, setBuildFormError] = useState('')
+  const [knowledgeBaseBySession, setKnowledgeBaseBySession] =
+    useState<Record<string, KnowledgeBaseConfig | null>>(createInitialKnowledgeBaseState)
+  const [isBuilding, setIsBuilding] = useState(false)
+  const [buildStageIndex, setBuildStageIndex] = useState(0)
+  const [isBuildMinimized, setIsBuildMinimized] = useState(false)
+  const [showBuildFailModal, setShowBuildFailModal] = useState(false)
+  const [chatQueryMode, setChatQueryMode] = useState<QueryMode>('hybrid_rerank')
+  const [chatTopN, setChatTopN] = useState(20)
+  const [chatTopK, setChatTopK] = useState(3)
+  const [chatAdvancedOpen, setChatAdvancedOpen] = useState(false)
+  const [expandedTopNByMessage, setExpandedTopNByMessage] = useState<Record<string, boolean>>({})
+  const [recallStateBySession, setRecallStateBySession] =
+    useState<Record<string, SessionRecallState>>(createInitialRecallState)
+  const [selectedChunk, setSelectedChunk] = useState<RecallChunk | null>(null)
+  const buildTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (buildTimerRef.current) {
+        window.clearTimeout(buildTimerRef.current)
+      }
+    }
+  }, [])
+
+  const filteredSessions = sessions.filter((session) =>
+    session.title.toLowerCase().includes(searchKeyword.trim().toLowerCase()),
+  )
+
+  const activeMessages = activeSessionId ? (messagesBySession[activeSessionId] ?? []) : []
+  const activeKnowledgeBase = activeSessionId ? (knowledgeBaseBySession[activeSessionId] ?? null) : null
+  const activeRecallState = activeSessionId
+    ? (recallStateBySession[activeSessionId] ?? { ...defaultSessionRecallState })
+    : { ...defaultSessionRecallState }
+
+  const updateActiveRecallState = (updater: (previous: SessionRecallState) => SessionRecallState) => {
+    if (!activeSessionId) {
+      return
+    }
+    setRecallStateBySession((previous) => ({
+      ...previous,
+      [activeSessionId]: updater(previous[activeSessionId] ?? { ...defaultSessionRecallState }),
+    }))
+  }
+
+  const touchSession = (sessionId: string, updatedTitle?: string) => {
+    setSessions((previous) => {
+      const target = previous.find((session) => session.id === sessionId)
+      if (!target) {
+        return previous
+      }
+
+      const updatedSession: ChatSession = {
+        ...target,
+        title: updatedTitle ?? target.title,
+        updatedAt: getNowLabel(),
+        isDraft: updatedTitle ? false : target.isDraft,
+      }
+
+      const others = previous.filter((session) => session.id !== sessionId)
+      return [updatedSession, ...others]
+    })
+  }
+
+  const handleCreateSession = () => {
+    const existingDraft = sessions.find((session) => session.isDraft)
+
+    if (existingDraft) {
+      setActiveSessionId(existingDraft.id)
+      return
+    }
+
+    const newSession: ChatSession = {
+      id: `session-${Date.now()}`,
+      title: '新会话',
+      updatedAt: '刚刚',
+      isDraft: true,
+    }
+
+    setSessions((previous) => [newSession, ...previous])
+    setMessagesBySession((previous) => ({
+      ...previous,
+      [newSession.id]: [
+        {
+          id: `msg-${Date.now()}-assistant`,
+          role: 'assistant',
+          content: '这是一个空白新会话，请输入你的第一个问题开始。',
+        },
+      ],
+    }))
+    setKnowledgeBaseBySession((previous) => ({
+      ...previous,
+      [newSession.id]: null,
+    }))
+    setRecallStateBySession((previous) => ({
+      ...previous,
+      [newSession.id]: { ...defaultSessionRecallState },
+    }))
+    setActiveSessionId(newSession.id)
+  }
+
+  const handleDeleteSession = (sessionId: string) => {
+    const remaining = sessions.filter((session) => session.id !== sessionId)
+    setSessions(remaining)
+    setMessagesBySession((previous) => {
+      const next = { ...previous }
+      delete next[sessionId]
+      return next
+    })
+    setSessionErrorMap((previous) => {
+      const next = { ...previous }
+      delete next[sessionId]
+      return next
+    })
+    setKnowledgeBaseBySession((previous) => {
+      const next = { ...previous }
+      delete next[sessionId]
+      return next
+    })
+    setRecallStateBySession((previous) => {
+      const next = { ...previous }
+      delete next[sessionId]
+      return next
+    })
+
+    if (remaining.length === 0) {
+      setActiveSessionId('')
+      return
+    }
+
+    if (activeSessionId === sessionId) {
+      setActiveSessionId(remaining[0].id)
+    }
+  }
+
+  const handleSendMessage = async (query: string, options?: { fromRetry?: boolean }) => {
+    if (!activeSessionId) {
+      return
+    }
+
+    const normalized = query.trim()
+    if (!normalized) {
+      return
+    }
+
+    const loadingMessageId = `msg-${Date.now()}-loading`
+
+    setSessionErrorMap((previous) => ({ ...previous, [activeSessionId]: undefined }))
+
+    if (!options?.fromRetry) {
+      setMessagesBySession((previous) => ({
+        ...previous,
+        [activeSessionId]: [
+          ...(previous[activeSessionId] ?? []),
+          { id: `msg-${Date.now()}-user`, role: 'user', content: normalized },
+        ],
+      }))
+    }
+
+    setMessagesBySession((previous) => ({
+      ...previous,
+      [activeSessionId]: [
+        ...(previous[activeSessionId] ?? []),
+        {
+          id: loadingMessageId,
+          role: 'assistant',
+          content: '正在生成回答...',
+          isLoading: true,
+        },
+      ],
+    }))
+
+    if (queryInput === normalized) {
+      setQueryInput('')
+    }
+    setSendingSessionId(activeSessionId)
+
+    const currentSession = sessions.find((session) => session.id === activeSessionId)
+    if (currentSession?.isDraft) {
+      touchSession(activeSessionId, truncateTitle(normalized))
+    } else {
+      touchSession(activeSessionId)
+    }
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      const replyBase = buildAssistantReply(normalized)
+      const citations =
+        chatQueryMode !== 'none' && activeKnowledgeBase
+          ? createMockRecallResults(normalized, chatQueryMode, chatTopN, chatTopK)
+          : { initial: [] as RecallChunk[], reranked: [] as RecallChunk[] }
+      const topKCitations = citations.reranked.slice(0, Math.max(1, Math.min(chatTopK, 3)))
+      const topNCitations = citations.initial.slice(0, Math.max(1, chatTopN))
+      const citedReply = buildCitedReply(replyBase, chatQueryMode, chatTopN, chatTopK, topKCitations)
+      setMessagesBySession((previous) => ({
+        ...previous,
+        [activeSessionId]: (previous[activeSessionId] ?? []).map((message) =>
+          message.id === loadingMessageId
+            ? {
+                id: `msg-${Date.now()}-assistant`,
+                role: 'assistant',
+                content: citedReply,
+                topKCitations,
+                topNCitations,
+              }
+            : message,
+        ),
+      }))
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : '发生未知错误，请稍后再试。'
+      setMessagesBySession((previous) => ({
+        ...previous,
+        [activeSessionId]: (previous[activeSessionId] ?? []).map((item) =>
+          item.id === loadingMessageId
+            ? {
+                id: `msg-${Date.now()}-assistant-error`,
+                role: 'assistant',
+                content: message,
+                isError: true,
+              }
+            : item,
+        ),
+      }))
+      setSessionErrorMap((previous) => ({
+        ...previous,
+        [activeSessionId]: {
+          failedQuery: normalized,
+          message,
+        },
+      }))
+    } finally {
+      setSendingSessionId(null)
+    }
+  }
+
+  const finishBuild = (appendFile = false) => {
+    if (!selectedFile || !activeSessionId) {
+      return
+    }
+    if (appendFile && activeKnowledgeBase) {
+      setKnowledgeBaseBySession((previous) => {
+        const current = previous[activeSessionId]
+        if (!current) {
+          return previous
+        }
+        return {
+          ...previous,
+          [activeSessionId]: {
+            ...current,
+            files: current.files.includes(selectedFile.name)
+              ? current.files
+              : [...current.files, selectedFile.name],
+          },
+        }
+      })
+      return
+    }
+
+    setKnowledgeBaseBySession((previous) => ({
+      ...previous,
+      [activeSessionId]: {
+        ...buildForm,
+        knowledgeBaseName: buildForm.knowledgeBaseName.trim(),
+        files: [selectedFile.name],
+      },
+    }))
+    updateActiveRecallState((previous) => ({
+      ...previous,
+      queryInput: '',
+      lastQuery: '',
+      initialResults: [],
+      rerankedResults: [],
+    }))
+  }
+
+  const startBuildFlow = (appendFile = false) => {
+    setBuildFormError('')
+    setShowUploadWizard(false)
+    setIsBuilding(true)
+    setIsBuildMinimized(false)
+    setBuildStageIndex(0)
+
+    const shouldFail = appendFile
+      ? /fail|失败/i.test(selectedFile?.name ?? '')
+      : /fail|失败/i.test(buildForm.knowledgeBaseName) || /fail|失败/i.test(selectedFile?.name ?? '')
+
+    const tick = (index: number) => {
+      setBuildStageIndex(index)
+      if (index >= buildStages.length - 1) {
+        buildTimerRef.current = window.setTimeout(() => {
+          setIsBuilding(false)
+          setIsBuildMinimized(false)
+          if (shouldFail) {
+            setShowBuildFailModal(true)
+            if (!appendFile) {
+              if (activeSessionId) {
+                setKnowledgeBaseBySession((previous) => ({
+                  ...previous,
+                  [activeSessionId]: null,
+                }))
+              }
+            }
+            return
+          }
+          finishBuild(appendFile)
+        }, 850)
+        return
+      }
+
+      buildTimerRef.current = window.setTimeout(() => tick(index + 1), 900)
+    }
+
+    tick(0)
+  }
+
+  const handleStartBuild = () => {
+    const error = validateBuildForm(buildForm)
+    if (!selectedFile) {
+      setBuildFormError('请先上传一个文档文件。')
+      return
+    }
+    if (error) {
+      setBuildFormError(error)
+      return
+    }
+    startBuildFlow(false)
+  }
+
+  const handleAppendFile = () => {
+    if (!selectedFile) {
+      setBuildFormError('请先选择一个文档。')
+      return
+    }
+    if (!activeKnowledgeBase) {
+      setBuildFormError('请先创建知识库。')
+      return
+    }
+    startBuildFlow(true)
+  }
+
+  const handleRecallTest = async () => {
+    const normalized = activeRecallState.queryInput.trim()
+    if (!normalized || !activeKnowledgeBase) {
+      return
+    }
+    if (activeRecallState.topN < 1 || activeRecallState.topK < 1) {
+      return
+    }
+    if (activeRecallState.topK > activeRecallState.topN) {
+      return
+    }
+    if (activeRecallState.queryMode === 'none') {
+      updateActiveRecallState((previous) => ({
+        ...previous,
+        lastQuery: normalized,
+        initialResults: [],
+        rerankedResults: [],
+      }))
+      return
+    }
+    updateActiveRecallState((previous) => ({ ...previous, isLoading: true }))
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const { initial, reranked } = createMockRecallResults(
+      normalized,
+      activeRecallState.queryMode,
+      activeRecallState.topN,
+      activeRecallState.topK,
+    )
+    updateActiveRecallState((previous) => ({
+      ...previous,
+      initialResults: initial,
+      rerankedResults: reranked,
+      lastQuery: normalized,
+      isLoading: false,
+    }))
+  }
+
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <h1 className="app-title">RAG本地知识库问答引擎</h1>
+      </header>
+
+      <main className="workspace">
+        <aside className="column left-column">
+          <Card title="历史会话" subtitle="支持搜索、新建、切换与删除">
+            <Input
+              placeholder="搜索会话标题..."
+              value={searchKeyword}
+              onChange={(event) => setSearchKeyword(event.target.value)}
+            />
+
+            <div className="session-list">
+              {filteredSessions.length === 0 ? (
+                <div className="session-empty">没有匹配的会话</div>
+              ) : (
+                filteredSessions.map((session) => (
+                  <div
+                    key={session.id}
+                    role="button"
+                    tabIndex={0}
+                    className={`session-item ${session.id === activeSessionId ? 'is-active' : ''}`}
+                    onClick={() => setActiveSessionId(session.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault()
+                        setActiveSessionId(session.id)
+                      }
+                    }}
+                  >
+                    <div className="session-main">
+                      <span className="session-title" title={session.title}>
+                        {session.title}
+                      </span>
+                      {session.isDraft ? <span className="session-badge">空白</span> : null}
+                    </div>
+                    <div className="session-meta">
+                      <span>{session.updatedAt}</span>
+                      <button
+                        type="button"
+                        className="session-delete"
+                        aria-label="删除会话"
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          setDeleteTarget(session)
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <Button variant="secondary" fullWidth onClick={handleCreateSession}>
+              新建会话
+            </Button>
+          </Card>
+        </aside>
+
+        <section className="column center-column">
+          <Card title="问答聊天区" subtitle="已支持发送、加载态、会话绑定与错误重试">
+            <div className="chat-stream">
+              {activeMessages.map((message) => (
+                <div key={message.id} className="chat-message">
+                  <div
+                    className={`chat-bubble ${message.role} ${message.isError ? 'is-error' : ''}`}
+                  >
+                    {message.isLoading ? <span className="typing-dots">思考中...</span> : message.content}
+                  </div>
+                  {message.role === 'assistant' && message.topKCitations && message.topKCitations.length > 0 ? (
+                    <div className="citation-panel">
+                      <div className="citation-panel-title">Top-K 引用来源</div>
+                      <div className="citation-panel-list">
+                        {message.topKCitations.map((chunk, index) => (
+                          <button
+                            key={`${message.id}-k-${chunk.id}`}
+                            type="button"
+                            className="citation-dropdown-item"
+                            onClick={() => setSelectedChunk(chunk)}
+                            title={chunk.content}
+                          >
+                            <span className="citation-index">[{index + 1}]</span>
+                            <span>{truncateText(chunk.content, 30)}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {message.role === 'assistant' && message.topNCitations && message.topNCitations.length > 0 ? (
+                    <div className="citation-dropdown">
+                      <button
+                        type="button"
+                        className="citation-dropdown-trigger"
+                        onClick={() =>
+                          setExpandedTopNByMessage((previous) => ({
+                            ...previous,
+                            [message.id]: !previous[message.id],
+                          }))
+                        }
+                      >
+                        初召回（Top-N）{expandedTopNByMessage[message.id] ? '▲' : '▼'}
+                      </button>
+                      {expandedTopNByMessage[message.id] ? (
+                        <div className="citation-dropdown-list">
+                          {message.topNCitations.map((chunk, index) => (
+                            <button
+                              key={`${message.id}-n-${chunk.id}`}
+                              type="button"
+                              className="citation-dropdown-item"
+                              onClick={() => setSelectedChunk(chunk)}
+                              title={chunk.content}
+                            >
+                              <span className="citation-index">[{index + 1}]</span>
+                              <span>{truncateText(chunk.content, 30)}</span>
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {activeMessages.length === 0 ? (
+                <div className="chat-empty-tip">请选择或创建会话开始聊天。</div>
+              ) : null}
+            </div>
+
+            {activeSessionId && sessionErrorMap[activeSessionId] ? (
+              <div className="retry-bar">
+                <span className="retry-text">{sessionErrorMap[activeSessionId]?.message}</span>
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    const failed = sessionErrorMap[activeSessionId]
+                    if (failed) {
+                      void handleSendMessage(failed.failedQuery, { fromRetry: true })
+                    }
+                  }}
+                  disabled={sendingSessionId === activeSessionId}
+                >
+                  重试
+                </Button>
+              </div>
+            ) : null}
+
+            <div className="advanced-panel">
+              <div className="advanced-panel__head">
+                <span className="advanced-summary">
+                  {getQueryModeLabel(chatQueryMode)} · Top-N {chatTopN} · Top-K {chatTopK}
+                </span>
+                <button
+                  type="button"
+                  className="advanced-toggle"
+                  onClick={() => setChatAdvancedOpen((previous) => !previous)}
+                >
+                  {chatAdvancedOpen ? '收起设置' : '高级设置'}
+                </button>
+              </div>
+              {chatAdvancedOpen ? (
+                <div className="advanced-grid">
+                  <label className="advanced-field">
+                    <span>问答模式</span>
+                    <select
+                      className="query-mode-select"
+                      value={chatQueryMode}
+                      onChange={(event) => setChatQueryMode(event.target.value as QueryMode)}
+                    >
+                      <option value="none">不使用知识库</option>
+                      <option value="vector">仅向量检索</option>
+                      <option value="hybrid">向量 + BM25</option>
+                      <option value="hybrid_rerank">向量 + BM25 + 精排</option>
+                    </select>
+                  </label>
+                  <label className="advanced-field">
+                    <span>Top-N</span>
+                    <Input
+                      className="query-number-input"
+                      type="number"
+                      min={1}
+                      value={chatTopN}
+                      onChange={(event) => setChatTopN(Math.max(1, Number(event.target.value || 1)))}
+                    />
+                  </label>
+                  <label className="advanced-field">
+                    <span>Top-K</span>
+                    <Input
+                      className="query-number-input"
+                      type="number"
+                      min={1}
+                      value={chatTopK}
+                      onChange={(event) => setChatTopK(Math.max(1, Number(event.target.value || 1)))}
+                    />
+                  </label>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="composer composer-main">
+              <Input
+                placeholder="输入你的问题..."
+                value={queryInput}
+                onChange={(event) => setQueryInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    void handleSendMessage(queryInput)
+                  }
+                }}
+                disabled={!activeSessionId || sendingSessionId === activeSessionId}
+              />
+              <Button
+                onClick={() => void handleSendMessage(queryInput)}
+                disabled={!activeSessionId || !queryInput.trim() || sendingSessionId === activeSessionId}
+              >
+                {sendingSessionId === activeSessionId ? '发送中...' : '发送'}
+              </Button>
+            </div>
+          </Card>
+        </section>
+
+        <aside className="column right-column">
+          <Card title="知识库与召回测试" subtitle="已实现上传、参数配置与构建状态流转">
+            {activeKnowledgeBase ? (
+              <>
+                <div className="kb-summary">
+                  <div className="kb-row">
+                    <span>知识库名称</span>
+                    <strong>{activeKnowledgeBase.knowledgeBaseName}</strong>
+                  </div>
+                  <div className="kb-row">
+                    <span>参数</span>
+                    <strong>
+                      Chunk {activeKnowledgeBase.chunkSize}/{activeKnowledgeBase.chunkOverlap}
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="kb-actions">
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setUploadWizardMode('append')
+                      setShowUploadWizard(true)
+                      setUploadStep('upload')
+                      setSelectedFile(null)
+                      setBuildFormError('')
+                    }}
+                  >
+                    继续上传文档
+                  </Button>
+                  <Button variant="secondary" onClick={() => setDeleteKnowledgeBaseConfirmOpen(true)}>
+                    删除知识库
+                  </Button>
+                </div>
+
+                <div className="kb-files">
+                  <h4 className="kb-files-title">已上传文件</h4>
+                  {activeKnowledgeBase.files.length === 0 ? (
+                    <p className="hint-line">暂无文件</p>
+                  ) : (
+                    activeKnowledgeBase.files.map((fileName) => (
+                      <div key={fileName} className="kb-file-item">
+                        <span title={fileName}>{fileName}</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setKnowledgeBaseBySession((previous) => {
+                              if (!activeSessionId) return previous
+                              const current = previous[activeSessionId]
+                              if (!current) return previous
+                              const nextFiles = current.files.filter((item) => item !== fileName)
+                              if (nextFiles.length === 0) {
+                                updateActiveRecallState((state) => ({
+                                  ...state,
+                                  initialResults: [],
+                                  rerankedResults: [],
+                                  lastQuery: '',
+                                  queryInput: '',
+                                }))
+                                return { ...previous, [activeSessionId]: null }
+                              }
+                              return {
+                                ...previous,
+                                [activeSessionId]: {
+                                  ...current,
+                                  files: nextFiles,
+                                },
+                              }
+                            })
+                          }
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="recall-box">
+                  <h4 className="recall-title">召回测试（Phase 4）</h4>
+                  <div className="advanced-panel">
+                    <div className="advanced-panel__head">
+                      <span className="advanced-summary">
+                        {getQueryModeLabel(activeRecallState.queryMode)} · Top-N {activeRecallState.topN} · Top-K {activeRecallState.topK}
+                      </span>
+                      <button
+                        type="button"
+                        className="advanced-toggle"
+                        onClick={() =>
+                          updateActiveRecallState((previous) => ({
+                            ...previous,
+                            advancedOpen: !previous.advancedOpen,
+                          }))
+                        }
+                      >
+                        {activeRecallState.advancedOpen ? '收起设置' : '高级设置'}
+                      </button>
+                    </div>
+                    {activeRecallState.advancedOpen ? (
+                      <div className="advanced-grid">
+                        <label className="advanced-field">
+                          <span>召回模式</span>
+                          <select
+                            className="query-mode-select"
+                            value={activeRecallState.queryMode}
+                            onChange={(event) =>
+                              updateActiveRecallState((previous) => ({
+                                ...previous,
+                                queryMode: event.target.value as QueryMode,
+                              }))
+                            }
+                          >
+                            <option value="vector">仅向量检索</option>
+                            <option value="hybrid">向量 + BM25</option>
+                            <option value="hybrid_rerank">向量 + BM25 + 精排</option>
+                          </select>
+                        </label>
+                        <label className="advanced-field">
+                          <span>Top-N</span>
+                          <Input
+                            className="query-number-input"
+                            type="number"
+                            min={1}
+                            value={activeRecallState.topN}
+                            onChange={(event) =>
+                              updateActiveRecallState((previous) => ({
+                                ...previous,
+                                topN: Math.max(1, Number(event.target.value || 1)),
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="advanced-field">
+                          <span>Top-K</span>
+                          <Input
+                            className="query-number-input"
+                            type="number"
+                            min={1}
+                            value={activeRecallState.topK}
+                            onChange={(event) =>
+                              updateActiveRecallState((previous) => ({
+                                ...previous,
+                                topK: Math.max(1, Number(event.target.value || 1)),
+                              }))
+                            }
+                          />
+                        </label>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="composer composer-main">
+                    <Input
+                      placeholder="输入测试查询..."
+                      value={activeRecallState.queryInput}
+                      onChange={(event) =>
+                        updateActiveRecallState((previous) => ({
+                          ...previous,
+                          queryInput: event.target.value,
+                        }))
+                      }
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault()
+                          void handleRecallTest()
+                        }
+                      }}
+                    />
+                    <Button
+                      onClick={() => void handleRecallTest()}
+                      disabled={!activeRecallState.queryInput.trim() || activeRecallState.isLoading}
+                    >
+                      发送
+                    </Button>
+                  </div>
+                  {activeRecallState.lastQuery ? (
+                    <p className="hint-line">最近一次召回测试：{activeRecallState.lastQuery}</p>
+                  ) : null}
+                  {activeRecallState.topK > activeRecallState.topN ? (
+                    <p className="form-error">Top-K 不能大于 Top-N。</p>
+                  ) : null}
+
+                  <div className="recall-actions">
+                    <button
+                      type="button"
+                      className="recall-collapse-trigger"
+                      onClick={() =>
+                        updateActiveRecallState((previous) => ({
+                          ...previous,
+                          initialExpanded: !previous.initialExpanded,
+                        }))
+                      }
+                      disabled={activeRecallState.initialResults.length === 0}
+                    >
+                      初召回结果（Top-N）{activeRecallState.initialExpanded ? '▲' : '▼'}
+                    </button>
+                  </div>
+
+                  {activeRecallState.isLoading ? <p className="hint-line">正在检索并重排，请稍候...</p> : null}
+
+                  {activeRecallState.lastQuery && activeRecallState.queryMode === 'none' ? (
+                    <p className="hint-line">当前模式为不使用知识库，不展示召回结果。</p>
+                  ) : null}
+
+                  {activeRecallState.lastQuery && !activeRecallState.isLoading ? (
+                    <div className="recall-result-list">
+                      {activeRecallState.rerankedResults.map((chunk) => (
+                        <button
+                          key={chunk.id}
+                          type="button"
+                          className="recall-result-item"
+                          onClick={() => setSelectedChunk(chunk)}
+                        >
+                          <div className="recall-result-head">
+                            <span>{chunk.title}</span>
+                            <strong>相关性 {chunk.score}</strong>
+                          </div>
+                          <p>{truncateText(chunk.content, 100)}</p>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {activeRecallState.initialExpanded ? (
+                    <div className="initial-result-list inline-initial-list">
+                      {activeRecallState.initialResults.map((chunk) => (
+                        <button
+                          key={chunk.id}
+                          type="button"
+                          className="initial-result-item"
+                          onClick={() => setSelectedChunk(chunk)}
+                        >
+                          <div className="recall-result-head">
+                            <span>{chunk.title}</span>
+                            <strong>相关性 {chunk.score}</strong>
+                          </div>
+                          <div className="initial-result-meta">
+                            <span className={`channel-badge ${chunk.channel === 'BM25' ? 'is-bm25' : 'is-vector'}`}>
+                              {chunk.channel}
+                            </span>
+                            <span>{chunk.source}</span>
+                          </div>
+                          <p>{truncateText(chunk.content, 100)}</p>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="empty-state">暂无知识库，请先上传文档开始构建</div>
+                <Button
+                  fullWidth
+                  onClick={() => {
+                    setUploadWizardMode('create')
+                    setShowUploadWizard(true)
+                    setUploadStep('upload')
+                    setSelectedFile(null)
+                    setBuildFormError('')
+                  }}
+                >
+                  上传文档
+                </Button>
+              </>
+            )}
+          </Card>
+        </aside>
+      </main>
+
+      <Modal
+        open={Boolean(deleteTarget)}
+        title="确认删除会话？"
+        description="删除后不可恢复。"
+        onClose={() => setDeleteTarget(null)}
+      >
+        <div className="modal-actions">
+          <Button variant="secondary" onClick={() => setDeleteTarget(null)}>
+            取消
+          </Button>
+          <Button
+            onClick={() => {
+              if (deleteTarget) {
+                handleDeleteSession(deleteTarget.id)
+              }
+              setDeleteTarget(null)
+            }}
+          >
+            确认删除
+          </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={showUploadWizard}
+        title={uploadStep === 'upload' ? '上传文档' : '配置构建参数'}
+        description={
+          uploadStep === 'upload'
+            ? '支持格式：.txt / .md / .pdf，单次仅上传 1 个文件。'
+            : '请确认参数后开始构建向量数据库。'
+        }
+        onClose={() => {
+          setShowUploadWizard(false)
+          setBuildFormError('')
+        }}
+      >
+        {uploadStep === 'upload' ? (
+          <div className="wizard-block">
+            <input
+              className="file-input"
+              type="file"
+              accept=".txt,.md,.pdf,text/plain,application/pdf,text/markdown"
+              onChange={(event) => {
+                const file = event.target.files?.[0] ?? null
+                setSelectedFile(file)
+              }}
+            />
+            {selectedFile ? <p className="hint-line">已选择：{selectedFile.name}</p> : null}
+            <div className="modal-actions">
+              <Button variant="secondary" onClick={() => setShowUploadWizard(false)}>
+                取消
+              </Button>
+              <Button
+                onClick={() => {
+                  if (!selectedFile) {
+                    setBuildFormError('请先选择一个文档。')
+                    return
+                  }
+                  if (uploadWizardMode === 'append') {
+                    handleAppendFile()
+                    return
+                  }
+                  setBuildFormError('')
+                  setUploadStep('config')
+                }}
+              >
+                {uploadWizardMode === 'append' ? '上传并构建' : '下一步'}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="wizard-block">
+            <div className="form-grid">
+              <label className="form-item">
+                <span>知识库名称</span>
+                <Input
+                  value={buildForm.knowledgeBaseName}
+                  onChange={(event) =>
+                    setBuildForm((previous) => ({
+                      ...previous,
+                      knowledgeBaseName: event.target.value,
+                    }))
+                  }
+                  placeholder="请输入知识库名称"
+                />
+              </label>
+              <label className="form-item">
+                <span>Chunk Size</span>
+                <Input
+                  type="number"
+                  min={256}
+                  max={4096}
+                  value={buildForm.chunkSize}
+                  onChange={(event) =>
+                    setBuildForm((previous) => ({
+                      ...previous,
+                      chunkSize: Number(event.target.value || 0),
+                    }))
+                  }
+                />
+              </label>
+              <label className="form-item">
+                <span>Chunk Overlap</span>
+                <Input
+                  type="number"
+                  min={0}
+                  max={512}
+                  value={buildForm.chunkOverlap}
+                  onChange={(event) =>
+                    setBuildForm((previous) => ({
+                      ...previous,
+                      chunkOverlap: Number(event.target.value || 0),
+                    }))
+                  }
+                />
+              </label>
+            </div>
+            <p className="hint-line">
+              提示：Top-N / Top-K 已移至问答区与召回测试区选择；若需模拟失败，可在知识库名称中包含“失败”进行测试。
+            </p>
+            <div className="modal-actions">
+              <Button variant="secondary" onClick={() => setUploadStep('upload')}>
+                上一步
+              </Button>
+              <Button variant="secondary" onClick={() => setShowUploadWizard(false)}>
+                取消
+              </Button>
+              <Button onClick={handleStartBuild}>开始构建</Button>
+            </div>
+          </div>
+        )}
+        {buildFormError ? <p className="form-error">{buildFormError}</p> : null}
+      </Modal>
+
+      <Modal
+        open={deleteKnowledgeBaseConfirmOpen}
+        title="确认删除知识库？"
+        description="删除后将清空右侧已上传文件与召回结果。"
+        onClose={() => setDeleteKnowledgeBaseConfirmOpen(false)}
+      >
+        <div className="modal-actions">
+          <Button variant="secondary" onClick={() => setDeleteKnowledgeBaseConfirmOpen(false)}>
+            取消
+          </Button>
+          <Button
+            onClick={() => {
+              if (activeSessionId) {
+                setKnowledgeBaseBySession((previous) => ({
+                  ...previous,
+                  [activeSessionId]: null,
+                }))
+              }
+              updateActiveRecallState((previous) => ({
+                ...previous,
+                initialResults: [],
+                rerankedResults: [],
+                lastQuery: '',
+                queryInput: '',
+              }))
+              setDeleteKnowledgeBaseConfirmOpen(false)
+            }}
+          >
+            确认删除
+          </Button>
+        </div>
+      </Modal>
+
+      {isBuilding && !isBuildMinimized ? (
+        <section className="build-dialog">
+          <div className="build-dialog__header">
+            <h3>构建进行中</h3>
+            <button type="button" onClick={() => setIsBuildMinimized(true)}>
+              最小化
+            </button>
+          </div>
+          <p className="build-hint">正在切分并构建向量索引，请稍候...</p>
+          <ul className="build-steps">
+            {buildStages.map((stage, index) => (
+              <li key={stage} className={index <= buildStageIndex ? 'is-done' : ''}>
+                {stage}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {isBuilding && isBuildMinimized ? (
+        <button
+          className="build-mini"
+          type="button"
+          onClick={() => setIsBuildMinimized(false)}
+        >
+          构建中：{buildStages[buildStageIndex]}（点击展开）
+        </button>
+      ) : null}
+
+      <Modal
+        open={showBuildFailModal}
+        title="创建向量数据库失败，请重试"
+        onClose={() => setShowBuildFailModal(false)}
+      >
+        <div className="modal-actions">
+          <Button onClick={() => setShowBuildFailModal(false)}>确认</Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(selectedChunk)}
+        title={selectedChunk?.title ?? '片段详情'}
+        description={selectedChunk ? `相关性 ${selectedChunk.score}` : ''}
+        onClose={() => setSelectedChunk(null)}
+      >
+        {selectedChunk ? (
+          <div className="chunk-detail">
+            <div className="chunk-detail-row">
+              <span>来源文档</span>
+              <strong>{selectedChunk.source}</strong>
+            </div>
+            <div className="chunk-detail-row">
+              <span>命中方式</span>
+              <strong>{selectedChunk.hitMode}</strong>
+            </div>
+            <article className="chunk-detail-content">{selectedChunk.content}</article>
+          </div>
+        ) : null}
+      </Modal>
+    </div>
+  )
+}
+
+export default App
