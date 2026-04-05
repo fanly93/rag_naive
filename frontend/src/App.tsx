@@ -108,6 +108,33 @@ type BackendKB = {
   }>
 }
 
+type BackendMessage = {
+  id: string
+  session_id: string
+  role: 'user' | 'assistant'
+  content: string
+  is_error: boolean
+  created_at: string
+  top_n_citations: Array<{
+    chunk_id: string
+    title: string
+    source: string
+    score: number
+    content: string
+    channel: 'vector' | 'bm25' | 'rerank'
+    hit_mode: string
+  }>
+  top_k_citations: Array<{
+    chunk_id: string
+    title: string
+    source: string
+    score: number
+    content: string
+    channel: 'vector' | 'bm25' | 'rerank'
+    hit_mode: string
+  }>
+}
+
 const buildStages = ['上传完成', '切分中', '索引构建中', '向量库构建中'] as const
 
 const API_PREFIX = '/api/v1'
@@ -202,6 +229,17 @@ function mapKnowledgeBase(item: BackendKB): KnowledgeBaseConfig {
       filename: file.filename,
       status: file.status,
     })),
+  }
+}
+
+function mapBackendMessage(item: BackendMessage): ChatMessage {
+  return {
+    id: item.id,
+    role: item.role,
+    content: item.content,
+    isError: item.is_error,
+    topNCitations: item.top_n_citations.map(mapRetrieveChunk),
+    topKCitations: item.top_k_citations.map(mapRetrieveChunk),
   }
 }
 
@@ -409,19 +447,15 @@ function App() {
         if (mapped.length > 0) {
           setActiveSessionId(mapped[0].id)
         }
-        setMessagesBySession(() => {
-          const next: Record<string, ChatMessage[]> = {}
-          mapped.forEach((session, idx) => {
-            next[session.id] = [{
-              id: `bootstrap-${session.id}`,
-              role: 'assistant',
-              content: idx === 0
-                ? '会话已从后端加载完成，你可以直接进行知识库构建与召回测试。'
-                : '会话已加载，可继续测试知识库与召回流程。',
-            }]
-          })
-          return next
-        })
+        const messageEntries = await Promise.all(mapped.map(async (session) => {
+          try {
+            const msgData = await request<{ items: BackendMessage[] }>(`/sessions/${session.id}/messages`)
+            return [session.id, msgData.items.map(mapBackendMessage)] as const
+          } catch {
+            return [session.id, []] as const
+          }
+        }))
+        setMessagesBySession(Object.fromEntries(messageEntries))
         setRecallStateBySession(() => {
           const next: Record<string, SessionRecallState> = {}
           mapped.forEach((session) => {
@@ -502,13 +536,7 @@ function App() {
       setSessions((previous) => [newSession, ...previous])
       setMessagesBySession((previous) => ({
         ...previous,
-        [newSession.id]: [
-          {
-            id: `msg-${Date.now()}-assistant`,
-            role: 'assistant',
-            content: '这是一个空白新会话，请输入你的第一个问题开始。',
-          },
-        ],
+        [newSession.id]: [],
       }))
       setKnowledgeBaseBySession((previous) => ({
         ...previous,

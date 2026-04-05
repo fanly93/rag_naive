@@ -8,7 +8,9 @@ from app.schemas.chat import ChatCompletionData
 from app.schemas.chat import ChatCompletionRequest
 from app.schemas.common import ApiResponse
 from app.services.chat_service import chat_service
+from app.services.chat_turn_service import chat_turn_service
 from app.services.knowledge_base_service import knowledge_base_service
+from app.services.message_service import message_service
 from app.services.retrieval_service import retrieval_service
 from app.services.session_service import session_service
 
@@ -32,9 +34,17 @@ def chat_completions(payload: ChatCompletionRequest) -> ApiResponse[ChatCompleti
             detail={"code": 1001, "message": "top_k must be <= top_n", "data": {"top_n": payload.top_n, "top_k": payload.top_k}},
         )
 
+    user_message = message_service.append_message(
+        session_id=payload.session_id,
+        role="user",
+        content=payload.query,
+        is_error=False,
+    )
+
     initial = []
     final = []
     context_chunks: list[tuple[int, str]] = []
+    resolved_knowledge_base_id: str | None = None
     if payload.mode != "none":
         kb_id = payload.knowledge_base_id or session_service.get_session(payload.session_id).knowledge_base_id
         if not kb_id:
@@ -84,6 +94,7 @@ def chat_completions(payload: ChatCompletionRequest) -> ApiResponse[ChatCompleti
             }
         knowledge_base_service.set_chunk_details(knowledge_base_id=kb_id, chunks=list(detail_by_id.values()))
         context_chunks = [(index + 1, item.content) for index, item in enumerate(final)]
+        resolved_knowledge_base_id = kb_id
 
     try:
         answer, provider, model = chat_service.complete(
@@ -93,10 +104,55 @@ def chat_completions(payload: ChatCompletionRequest) -> ApiResponse[ChatCompleti
             model=payload.model,
         )
     except Exception as exc:
+        assistant_message = message_service.append_message(
+            session_id=payload.session_id,
+            role="assistant",
+            content=str(exc),
+            is_error=True,
+        )
+        chat_turn_service.persist_turn(
+            session_id=payload.session_id,
+            user_message_id=user_message.id,
+            assistant_message_id=assistant_message.id,
+            query_text=payload.query,
+            answer_text=str(exc),
+            mode=payload.mode,
+            top_n=payload.top_n,
+            top_k=payload.top_k,
+            provider=payload.provider,
+            model=payload.model,
+            knowledge_base_id=resolved_knowledge_base_id,
+            initial_results=initial,
+            final_results=final,
+            is_error=True,
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"code": 4001, "message": "chat completion failed", "data": {"error": str(exc)}},
         )
+
+    assistant_message = message_service.append_message(
+        session_id=payload.session_id,
+        role="assistant",
+        content=answer,
+        is_error=False,
+    )
+    chat_turn_service.persist_turn(
+        session_id=payload.session_id,
+        user_message_id=user_message.id,
+        assistant_message_id=assistant_message.id,
+        query_text=payload.query,
+        answer_text=answer,
+        mode=payload.mode,
+        top_n=payload.top_n,
+        top_k=payload.top_k,
+        provider=provider,
+        model=model,
+        knowledge_base_id=resolved_knowledge_base_id,
+        initial_results=initial,
+        final_results=final,
+        is_error=False,
+    )
 
     return ApiResponse(
         data=ChatCompletionData(
@@ -125,9 +181,17 @@ def chat_completions_stream(payload: ChatCompletionRequest) -> StreamingResponse
             detail={"code": 1001, "message": "top_k must be <= top_n", "data": {"top_n": payload.top_n, "top_k": payload.top_k}},
         )
 
+    user_message = message_service.append_message(
+        session_id=payload.session_id,
+        role="user",
+        content=payload.query,
+        is_error=False,
+    )
+
     initial = []
     final = []
     context_chunks: list[tuple[int, str]] = []
+    resolved_knowledge_base_id: str | None = None
     if payload.mode != "none":
         session = session_service.get_session(payload.session_id)
         kb_id = payload.knowledge_base_id or (session.knowledge_base_id if session else None)
@@ -178,6 +242,7 @@ def chat_completions_stream(payload: ChatCompletionRequest) -> StreamingResponse
             }
         knowledge_base_service.set_chunk_details(knowledge_base_id=kb_id, chunks=list(detail_by_id.values()))
         context_chunks = [(index + 1, item.content) for index, item in enumerate(final)]
+        resolved_knowledge_base_id = kb_id
 
     try:
         stream_iter, provider, model = chat_service.stream_complete(
@@ -210,8 +275,52 @@ def chat_completions_stream(payload: ChatCompletionRequest) -> StreamingResponse
             for token in stream_iter:
                 full_answer += token
                 yield _sse_event("delta", {"content": token})
+            assistant_message = message_service.append_message(
+                session_id=payload.session_id,
+                role="assistant",
+                content=full_answer,
+                is_error=False,
+            )
+            chat_turn_service.persist_turn(
+                session_id=payload.session_id,
+                user_message_id=user_message.id,
+                assistant_message_id=assistant_message.id,
+                query_text=payload.query,
+                answer_text=full_answer,
+                mode=payload.mode,
+                top_n=payload.top_n,
+                top_k=payload.top_k,
+                provider=provider,
+                model=model,
+                knowledge_base_id=resolved_knowledge_base_id,
+                initial_results=initial,
+                final_results=final,
+                is_error=False,
+            )
             yield _sse_event("done", {"answer": full_answer})
         except Exception as exc:
+            assistant_message = message_service.append_message(
+                session_id=payload.session_id,
+                role="assistant",
+                content=str(exc),
+                is_error=True,
+            )
+            chat_turn_service.persist_turn(
+                session_id=payload.session_id,
+                user_message_id=user_message.id,
+                assistant_message_id=assistant_message.id,
+                query_text=payload.query,
+                answer_text=str(exc),
+                mode=payload.mode,
+                top_n=payload.top_n,
+                top_k=payload.top_k,
+                provider=provider,
+                model=model,
+                knowledge_base_id=resolved_knowledge_base_id,
+                initial_results=initial,
+                final_results=final,
+                is_error=True,
+            )
             yield _sse_event("error", {"message": str(exc)})
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

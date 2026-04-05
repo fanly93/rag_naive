@@ -2,48 +2,77 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
+from sqlalchemy import desc, select
+
+from app.db import SessionLocal
+from app.models import SessionModel
 from app.schemas.session import Session, SessionCreateRequest
 
 
 class SessionService:
-    def __init__(self) -> None:
-        self._sessions: dict[str, Session] = {}
+    def _to_schema(self, row: SessionModel) -> Session:
+        updated_at = row.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return Session(
+            id=row.id,
+            title=row.title,
+            updated_at=updated_at,
+            is_draft=row.is_draft,
+            knowledge_base_id=row.knowledge_base_id,
+        )
 
     def list_sessions(self) -> list[Session]:
-        return sorted(self._sessions.values(), key=lambda x: x.updated_at, reverse=True)
+        with SessionLocal() as db:
+            rows = db.scalars(select(SessionModel).order_by(desc(SessionModel.updated_at))).all()
+            return [self._to_schema(item) for item in rows]
 
     def create_session(self, payload: SessionCreateRequest) -> Session:
         now = datetime.now(timezone.utc)
-        session = Session(
+        row = SessionModel(
             id=f"sess_{uuid4().hex[:8]}",
             title=payload.title,
             updated_at=now,
             is_draft=payload.is_draft,
             knowledge_base_id=None,
         )
-        self._sessions[session.id] = session
-        return session
+        with SessionLocal() as db:
+            db.add(row)
+            db.commit()
+            db.refresh(row)
+            return self._to_schema(row)
 
     def delete_session(self, session_id: str) -> bool:
-        if session_id not in self._sessions:
-            return False
-        del self._sessions[session_id]
-        return True
+        with SessionLocal() as db:
+            row = db.get(SessionModel, session_id)
+            if row is None:
+                return False
+            db.delete(row)
+            db.commit()
+            return True
 
     def get_session(self, session_id: str) -> Optional[Session]:
-        return self._sessions.get(session_id)
+        with SessionLocal() as db:
+            row = db.get(SessionModel, session_id)
+            if row is None:
+                return None
+            return self._to_schema(row)
 
     def session_exists(self, session_id: str) -> bool:
-        return session_id in self._sessions
+        with SessionLocal() as db:
+            row = db.get(SessionModel, session_id)
+            return row is not None
 
     def bind_knowledge_base(self, session_id: str, knowledge_base_id: Optional[str]) -> bool:
-        target = self._sessions.get(session_id)
-        if not target:
-            return False
-        target.knowledge_base_id = knowledge_base_id
-        target.updated_at = datetime.now(timezone.utc)
-        self._sessions[session_id] = target
-        return True
+        with SessionLocal() as db:
+            row = db.get(SessionModel, session_id)
+            if row is None:
+                return False
+            row.knowledge_base_id = knowledge_base_id
+            row.updated_at = datetime.now(timezone.utc)
+            db.add(row)
+            db.commit()
+            return True
 
 
 session_service = SessionService()

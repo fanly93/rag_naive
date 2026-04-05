@@ -4,8 +4,10 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.schemas.common import ApiResponse
 from app.schemas.knowledge_base import KnowledgeBase
+from app.schemas.message import SessionMessageListData
 from app.schemas.session import Session, SessionCreateRequest, SessionDeleteData, SessionListData
 from app.services.knowledge_base_service import knowledge_base_service
+from app.services.message_service import message_service
 from app.services.session_service import session_service
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -50,3 +52,14 @@ def get_session_knowledge_base(session_id: str) -> ApiResponse[Optional[Knowledg
     if kb is None:
         return ApiResponse(data=None)
     return ApiResponse(data=kb)
+
+
+@router.get("/{session_id}/messages", response_model=ApiResponse[SessionMessageListData])
+def list_session_messages(session_id: str) -> ApiResponse[SessionMessageListData]:
+    if not session_service.session_exists(session_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": 1002, "message": "session not found", "data": {"session_id": session_id}},
+        )
+    items = message_service.list_messages(session_id=session_id)
+    return ApiResponse(data=SessionMessageListData(items=items))
