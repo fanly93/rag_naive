@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app.api.routes.build_tasks import router as build_tasks_router
 from app.api.routes.health import router as health_router
 from app.api.routes.knowledge_bases import router as knowledge_bases_router
 from app.api.routes.sessions import router as sessions_router
@@ -46,3 +47,4 @@ def root() -> ApiResponse[dict[str, str]]:
 app.include_router(health_router, prefix=settings.api_prefix)
 app.include_router(sessions_router, prefix=settings.api_prefix)
 app.include_router(knowledge_bases_router, prefix=settings.api_prefix)
+app.include_router(build_tasks_router, prefix=settings.api_prefix)

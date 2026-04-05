@@ -51,5 +51,15 @@ class RagIngestService:
         VectorStoreIndex(nodes=nodes, storage_context=storage_context)
         return len(nodes)
 
+    def split_only(self, kb: KnowledgeBase, file_paths: list[str]) -> int:
+        if not file_paths:
+            raise ValueError("knowledge base has no files on disk")
+        documents = SimpleDirectoryReader(input_files=file_paths).load_data()
+        splitter = SentenceSplitter(chunk_size=kb.chunk_size, chunk_overlap=kb.chunk_overlap)
+        nodes = splitter.get_nodes_from_documents(documents)
+        if not nodes:
+            raise ValueError("no nodes generated from uploaded files")
+        return len(nodes)
+
 
 rag_ingest_service = RagIngestService()

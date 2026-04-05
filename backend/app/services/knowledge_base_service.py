@@ -9,6 +9,7 @@ class KnowledgeBaseService:
     def __init__(self) -> None:
         self._kbs: dict[str, KnowledgeBase] = {}
         self._file_paths: dict[str, str] = {}
+        self._task_results: dict[str, dict[str, int]] = {}
 
     def create_knowledge_base(
         self,
@@ -18,11 +19,10 @@ class KnowledgeBaseService:
         file_name: str,
         file_size: Optional[int],
         mime_type: Optional[str],
-    ) -> tuple[KnowledgeBase, str]:
+    ) -> KnowledgeBase:
         now = datetime.now(timezone.utc)
         kb_id = f"kb_{uuid4().hex[:8]}"
         file_id = f"file_{uuid4().hex[:8]}"
-        task_id = f"task_{uuid4().hex[:8]}"
 
         kb_file = KBFile(
             id=file_id,
@@ -43,7 +43,7 @@ class KnowledgeBaseService:
             updated_at=now,
         )
         self._kbs[kb_id] = kb
-        return kb, task_id
+        return kb
 
     def get_knowledge_base(self, knowledge_base_id: str) -> Optional[KnowledgeBase]:
         return self._kbs.get(knowledge_base_id)
@@ -64,6 +64,12 @@ class KnowledgeBaseService:
             if file_path:
                 paths.append(file_path)
         return paths
+
+    def set_task_result(self, task_id: str, result: dict[str, int]) -> None:
+        self._task_results[task_id] = result
+
+    def get_task_result(self, task_id: str) -> Optional[dict[str, int]]:
+        return self._task_results.get(task_id)
 
     def set_knowledge_base_status(self, knowledge_base_id: str, status: str) -> None:
         kb = self._kbs.get(knowledge_base_id)
@@ -108,7 +114,7 @@ class KnowledgeBaseService:
         kb.status = "building"
         kb.updated_at = now
         self._kbs[knowledge_base_id] = kb
-        return f"task_{uuid4().hex[:8]}"
+        return new_file.id
 
     def delete_knowledge_base(self, knowledge_base_id: str) -> bool:
         kb = self._kbs.get(knowledge_base_id)

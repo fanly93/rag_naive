@@ -8,6 +8,7 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseFileAppendData,
     KnowledgeBaseFileDeleteData,
 )
+from app.services.build_orchestrator_service import build_orchestrator_service
 from app.services.knowledge_base_service import knowledge_base_service
 from app.services.rag_ingest_service import rag_ingest_service
 from app.services.session_service import session_service
@@ -67,7 +68,7 @@ async def create_knowledge_base(
 
     _validate_file(file)
     file_content = await file.read()
-    kb, task_id = knowledge_base_service.create_knowledge_base(
+    kb = knowledge_base_service.create_knowledge_base(
         name=name.strip(),
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
@@ -84,25 +85,16 @@ async def create_knowledge_base(
         content=file_content,
     )
     knowledge_base_service.set_file_path(file_id=file_id, file_path=str(file_path))
-    knowledge_base_service.set_file_status(knowledge_base_id=kb.id, file_id=file_id, status="indexing")
-
-    try:
-        rag_ingest_service.build_index(kb=kb, file_paths=knowledge_base_service.get_file_paths(kb.id))
-    except Exception as exc:
-        knowledge_base_service.set_file_status(knowledge_base_id=kb.id, file_id=file_id, status="failed")
-        knowledge_base_service.set_knowledge_base_status(knowledge_base_id=kb.id, status="failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"code": 3001, "message": "knowledge base build failed", "data": {"error": str(exc)}},
-        )
-
-    knowledge_base_service.set_file_status(knowledge_base_id=kb.id, file_id=file_id, status="ready")
-    knowledge_base_service.set_knowledge_base_status(knowledge_base_id=kb.id, status="ready")
-    session_service.bind_knowledge_base(session_id=session_id, knowledge_base_id=kb.id)
+    task = build_orchestrator_service.enqueue_create_build(
+        session_id=session_id,
+        knowledge_base_id=kb.id,
+        file_id=file_id,
+        should_fail=("fail" in (file.filename or "").lower() or "失败" in (file.filename or "")),
+    )
 
     return ApiResponse(
         message="accepted",
-        data=KnowledgeBaseCreateAcceptedData(knowledge_base_id=kb.id, task_id=task_id),
+        data=KnowledgeBaseCreateAcceptedData(knowledge_base_id=kb.id, task_id=task.task_id),
     )
 
 
@@ -114,13 +106,13 @@ async def append_file(
     _validate_file(file)
     file_content = await file.read()
 
-    task_id = knowledge_base_service.append_file(
+    file_id = knowledge_base_service.append_file(
         knowledge_base_id=knowledge_base_id,
         file_name=file.filename or "unknown",
         file_size=len(file_content),
         mime_type=file.content_type,
     )
-    if task_id is None:
+    if file_id is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": 1002, "message": "knowledge base not found", "data": {"knowledge_base_id": knowledge_base_id}},
@@ -132,33 +124,25 @@ async def append_file(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": 1002, "message": "knowledge base not found", "data": {"knowledge_base_id": knowledge_base_id}},
         )
-    new_file_id = kb.files[-1].id
     session_candidates = [item.id for item in session_service.list_sessions() if item.knowledge_base_id == knowledge_base_id]
     session_id = session_candidates[0] if session_candidates else "unknown_session"
 
     file_path = rag_ingest_service.save_file(
         session_id=session_id,
         knowledge_base_id=knowledge_base_id,
-        file_id=new_file_id,
+        file_id=file_id,
         filename=file.filename or "unknown",
         content=file_content,
     )
-    knowledge_base_service.set_file_path(file_id=new_file_id, file_path=str(file_path))
-    knowledge_base_service.set_file_status(knowledge_base_id=knowledge_base_id, file_id=new_file_id, status="indexing")
-    try:
-        rag_ingest_service.build_index(kb=kb, file_paths=knowledge_base_service.get_file_paths(knowledge_base_id))
-    except Exception as exc:
-        knowledge_base_service.set_file_status(knowledge_base_id=knowledge_base_id, file_id=new_file_id, status="failed")
-        knowledge_base_service.set_knowledge_base_status(knowledge_base_id=knowledge_base_id, status="failed")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"code": 3001, "message": "knowledge base build failed", "data": {"error": str(exc)}},
-        )
-    knowledge_base_service.set_file_status(knowledge_base_id=knowledge_base_id, file_id=new_file_id, status="ready")
-    knowledge_base_service.set_knowledge_base_status(knowledge_base_id=knowledge_base_id, status="ready")
+    knowledge_base_service.set_file_path(file_id=file_id, file_path=str(file_path))
+    task = build_orchestrator_service.enqueue_append_build(
+        knowledge_base_id=knowledge_base_id,
+        file_id=file_id,
+        should_fail=("fail" in (file.filename or "").lower() or "失败" in (file.filename or "")),
+    )
 
     return ApiResponse(
-        data=KnowledgeBaseFileAppendData(knowledge_base_id=knowledge_base_id, task_id=task_id),
+        data=KnowledgeBaseFileAppendData(knowledge_base_id=knowledge_base_id, task_id=task.task_id),
     )
 
 
