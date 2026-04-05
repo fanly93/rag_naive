@@ -3,12 +3,12 @@ import math
 import re
 from collections import defaultdict
 
-from llama_index.core import SimpleDirectoryReader
 from llama_index.core.node_parser import SentenceSplitter
 
 from app.schemas.knowledge_base import KnowledgeBase
 from app.schemas.retrieval import RetrievalChunk
 from app.schemas.retrieval import RetrieveMode
+from app.services.rag_ingest_service import rag_ingest_service
 
 
 class RetrievalService:
@@ -46,7 +46,7 @@ class RetrievalService:
         return f"ch_{digest}"
 
     def _build_chunks(self, kb: KnowledgeBase, file_paths: list[str], query: str) -> list[dict[str, str | float]]:
-        docs = SimpleDirectoryReader(input_files=file_paths).load_data()
+        docs = rag_ingest_service.load_documents(file_paths=file_paths)
         splitter = SentenceSplitter(chunk_size=kb.chunk_size, chunk_overlap=kb.chunk_overlap)
         nodes = splitter.get_nodes_from_documents(docs)
         built: list[dict[str, str | float]] = []
@@ -161,6 +161,9 @@ class RetrievalService:
         else:
             final = initial[:top_k]
 
+        # Keep response order stable: highest relevance first.
+        initial = sorted(initial, key=lambda item: item.score, reverse=True)
+        final = sorted(final, key=lambda item: item.score, reverse=True)
         return initial, final, all_chunks
 
 

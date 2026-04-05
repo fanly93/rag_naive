@@ -16,7 +16,8 @@ class Settings(BaseSettings):
     upload_root: str = str(Path(__file__).resolve().parents[2] / "data" / "uploads")
     milvus_url: str = str(Path(__file__).resolve().parents[2] / "data" / "milvus.db")
     embedding_dim: int = 256
-    task_simulate_build: bool = True
+    # Phase4 used simulation for state-machine verification; default to real build now.
+    task_simulate_build: bool = False
 
 
 @lru_cache(maxsize=1)

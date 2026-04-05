@@ -8,14 +8,17 @@ router = APIRouter(tags=["chunks"])
 
 
 def _to_retrieval_chunk(raw: dict[str, str | float]) -> RetrievalChunk:
+    channel = str(raw.get("channel", "vector"))
+    if channel not in {"vector", "bm25", "rerank"}:
+        channel = "vector"
     return RetrievalChunk(
         chunk_id=str(raw["chunk_id"]),
         title=str(raw["title"]),
         source=str(raw["source"]),
-        score=float(raw["hybrid_score"]),
+        score=float(raw.get("score", raw.get("hybrid_score", 0.0))),
         content=str(raw["content"]),
-        channel="vector",
-        hit_mode="vector",
+        channel=channel,  # type: ignore[arg-type]
+        hit_mode=str(raw.get("hit_mode", channel)),
     )
 
 

@@ -35,8 +35,16 @@ type BuildForm = {
   chunkOverlap: number
 }
 
+type KBFile = {
+  id: string
+  filename: string
+  status: 'uploaded' | 'indexing' | 'ready' | 'failed'
+}
+
 type KnowledgeBaseConfig = BuildForm & {
-  files: string[]
+  knowledgeBaseId: string
+  status: 'empty' | 'building' | 'ready' | 'failed'
+  files: KBFile[]
 }
 
 type RecallChannel = 'Vector' | 'BM25' | 'Rerank'
@@ -64,52 +72,44 @@ type SessionRecallState = {
   rerankedResults: RecallChunk[]
 }
 
+type ApiResponse<T> = {
+  code: number
+  message: string
+  data: T
+}
+
+type BuildTask = {
+  task_id: string
+  knowledge_base_id: string
+  stage: 'uploaded' | 'chunking' | 'indexing' | 'vectorizing' | 'done' | 'failed'
+  progress: number
+  error_message: string | null
+}
+
+type BackendSession = {
+  id: string
+  title: string
+  updated_at: string
+  is_draft: boolean
+  knowledge_base_id: string | null
+}
+
+type BackendKB = {
+  id: string
+  name: string
+  chunk_size: number
+  chunk_overlap: number
+  status: 'empty' | 'building' | 'ready' | 'failed'
+  files: Array<{
+    id: string
+    filename: string
+    status: 'uploaded' | 'indexing' | 'ready' | 'failed'
+  }>
+}
+
 const buildStages = ['上传完成', '切分中', '索引构建中', '向量库构建中'] as const
 
-const initialSessions: ChatSession[] = [
-  {
-    id: 'session-1',
-    title: 'Agentic RAG 方案讨论',
-    updatedAt: '今天 10:26',
-    isDraft: false,
-  },
-  {
-    id: 'session-2',
-    title: 'LlamaIndex 索引调优',
-    updatedAt: '今天 09:41',
-    isDraft: false,
-  },
-  {
-    id: 'session-3',
-    title: 'LangChain Agent 工具编排',
-    updatedAt: '昨天 21:18',
-    isDraft: false,
-  },
-]
-
-const initialMessages: Record<string, ChatMessage[]> = {
-  'session-1': [
-    {
-      id: 'msg-1',
-      role: 'assistant',
-      content: '你好，我可以帮你分析 Agentic RAG 的架构与前端规划。',
-    },
-  ],
-  'session-2': [
-    {
-      id: 'msg-2',
-      role: 'assistant',
-      content: '已进入索引调优会话，你可以继续提问 chunk 与召回参数。',
-    },
-  ],
-  'session-3': [
-    {
-      id: 'msg-3',
-      role: 'assistant',
-      content: '这里是 Agent 工具编排会话，可继续讨论 LangChain 工具调用流。',
-    },
-  ],
-}
+const API_PREFIX = '/api/v1'
 
 const defaultBuildForm: BuildForm = {
   knowledgeBaseName: '',
@@ -161,73 +161,6 @@ function truncateText(text: string, maxLength: number) {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
 }
 
-function createMockRecallResults(
-  query: string,
-  mode: QueryMode,
-  topN: number,
-  topK: number,
-) {
-  const seedContents = [
-    {
-      title: 'Agentic RAG 入门指南',
-      source: 'Agentic-RAG-Guide.md',
-      content:
-        'Agentic RAG 将检索增强生成与代理式规划结合。系统先进行第一阶段召回，得到候选片段池，再通过重排模型筛选最相关上下文，最后由生成模型综合作答。该模式在复杂问答、多轮追问与工具调用场景中更稳定。',
-    },
-    {
-      title: 'LlamaIndex 检索实践',
-      source: 'LlamaIndex-Retrieval.md',
-      content:
-        '在 LlamaIndex 体系中，索引构建与查询时检索策略可以分离配置。常见做法是通过 chunk size 与 overlap 平衡召回覆盖和噪声，再结合向量召回与 BM25 混合检索扩展候选集合，并在第二阶段引入 cross-encoder 重排。',
-    },
-    {
-      title: 'LangChain Agent 工具调用',
-      source: 'LangChain-Agent-Tooling.md',
-      content:
-        'LangChain Agent 可将 LlamaIndex 的 query engine 封装为工具，在规划阶段按用户问题动态调用。对前端而言，建议显式展示“召回候选”与“最终重排结果”，帮助用户理解模型如何引用知识库内容并形成可追溯回答链路。',
-    },
-  ]
-
-  const initial: RecallChunk[] = Array.from({ length: topN }).map((_, index) => {
-    const base = seedContents[index % seedContents.length]
-    const channel: RecallChannel = mode === 'hybrid' || mode === 'hybrid_rerank'
-      ? (index % 2 === 0 ? 'Vector' : 'BM25')
-      : 'Vector'
-    const score = Number((0.92 - index * 0.012).toFixed(2))
-
-    return {
-      id: `initial-${index + 1}`,
-      title: `文档片段${index + 1} · ${base.title}`,
-      source: base.source,
-      score: score < 0.2 ? 0.2 : score,
-      content: `${base.content}（测试查询：${query}）`,
-      hitMode: channel,
-      channel,
-    }
-  })
-
-  const reranked = mode === 'hybrid_rerank'
-    ? [...initial]
-        .sort((a, b) => b.score - a.score)
-        .slice(0, topK)
-        .map((item, index) => ({
-          ...item,
-          id: `rerank-${index + 1}`,
-          score: Number((item.score + 0.03).toFixed(2)),
-          channel: 'Rerank' as const,
-          hitMode: `Rerank（来自 ${item.hitMode}）`,
-        }))
-    : [...initial]
-        .slice(0, topK)
-        .map((item, index) => ({
-          ...item,
-          id: `final-${index + 1}`,
-          hitMode: item.hitMode,
-        }))
-
-  return { initial, reranked }
-}
-
 function validateBuildForm(form: BuildForm) {
   if (!form.knowledgeBaseName.trim()) {
     return '知识库名称为必填项。'
@@ -248,14 +181,70 @@ function validateBuildForm(form: BuildForm) {
   return ''
 }
 
-function createInitialKnowledgeBaseState() {
-  return Object.fromEntries(initialSessions.map((session) => [session.id, null as KnowledgeBaseConfig | null]))
+function formatUpdatedAt(isoText: string) {
+  const date = new Date(isoText)
+  const hh = String(date.getHours()).padStart(2, '0')
+  const mm = String(date.getMinutes()).padStart(2, '0')
+  return `今天 ${hh}:${mm}`
 }
 
-function createInitialRecallState() {
-  return Object.fromEntries(
-    initialSessions.map((session) => [session.id, { ...defaultSessionRecallState }]),
-  ) as Record<string, SessionRecallState>
+function mapSession(item: BackendSession): ChatSession {
+  return {
+    id: item.id,
+    title: item.title,
+    updatedAt: formatUpdatedAt(item.updated_at),
+    isDraft: item.is_draft,
+  }
+}
+
+function mapKnowledgeBase(item: BackendKB): KnowledgeBaseConfig {
+  return {
+    knowledgeBaseId: item.id,
+    knowledgeBaseName: item.name,
+    chunkSize: item.chunk_size,
+    chunkOverlap: item.chunk_overlap,
+    status: item.status,
+    files: item.files.map((file) => ({
+      id: file.id,
+      filename: file.filename,
+      status: file.status,
+    })),
+  }
+}
+
+async function request<T>(path: string, init?: RequestInit) {
+  const response = await fetch(`${API_PREFIX}${path}`, init)
+  const payload = (await response.json()) as ApiResponse<T> | { code?: number; message?: string }
+  if (!response.ok || !('code' in payload) || payload.code !== 0) {
+    const message = 'message' in payload && payload.message ? payload.message : `请求失败: ${response.status}`
+    throw new Error(message)
+  }
+  return (payload as ApiResponse<T>).data
+}
+
+function mapRetrieveChunk(item: {
+  chunk_id: string
+  title: string
+  source: string
+  score: number
+  content: string
+  channel: 'vector' | 'bm25' | 'rerank'
+  hit_mode: string
+}): RecallChunk {
+  const channelMap: Record<'vector' | 'bm25' | 'rerank', RecallChannel> = {
+    vector: 'Vector',
+    bm25: 'BM25',
+    rerank: 'Rerank',
+  }
+  return {
+    id: item.chunk_id,
+    title: item.title,
+    source: item.source,
+    score: item.score,
+    content: item.content,
+    hitMode: item.hit_mode,
+    channel: channelMap[item.channel],
+  }
 }
 
 function buildCitedReply(
@@ -275,10 +264,10 @@ function buildCitedReply(
 }
 
 function App() {
-  const [sessions, setSessions] = useState<ChatSession[]>(initialSessions)
-  const [activeSessionId, setActiveSessionId] = useState(initialSessions[0].id)
+  const [sessions, setSessions] = useState<ChatSession[]>([])
+  const [activeSessionId, setActiveSessionId] = useState('')
   const [messagesBySession, setMessagesBySession] =
-    useState<Record<string, ChatMessage[]>>(initialMessages)
+    useState<Record<string, ChatMessage[]>>({})
   const [queryInput, setQueryInput] = useState('')
   const [sendingSessionId, setSendingSessionId] = useState<string | null>(null)
   const [sessionErrorMap, setSessionErrorMap] = useState<Record<string, SessionError | undefined>>({})
@@ -292,7 +281,7 @@ function App() {
   const [buildForm, setBuildForm] = useState<BuildForm>(defaultBuildForm)
   const [buildFormError, setBuildFormError] = useState('')
   const [knowledgeBaseBySession, setKnowledgeBaseBySession] =
-    useState<Record<string, KnowledgeBaseConfig | null>>(createInitialKnowledgeBaseState)
+    useState<Record<string, KnowledgeBaseConfig | null>>({})
   const [isBuilding, setIsBuilding] = useState(false)
   const [buildStageIndex, setBuildStageIndex] = useState(0)
   const [isBuildMinimized, setIsBuildMinimized] = useState(false)
@@ -303,7 +292,7 @@ function App() {
   const [chatAdvancedOpen, setChatAdvancedOpen] = useState(false)
   const [expandedTopNByMessage, setExpandedTopNByMessage] = useState<Record<string, boolean>>({})
   const [recallStateBySession, setRecallStateBySession] =
-    useState<Record<string, SessionRecallState>>(createInitialRecallState)
+    useState<Record<string, SessionRecallState>>({})
   const [selectedChunk, setSelectedChunk] = useState<RecallChunk | null>(null)
   const buildTimerRef = useRef<number | null>(null)
 
@@ -313,6 +302,51 @@ function App() {
         window.clearTimeout(buildTimerRef.current)
       }
     }
+  }, [])
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      try {
+        const sessionData = await request<{ items: BackendSession[] }>('/sessions')
+        const mapped = sessionData.items.map(mapSession)
+        setSessions(mapped)
+        if (mapped.length > 0) {
+          setActiveSessionId(mapped[0].id)
+        }
+        setMessagesBySession(() => {
+          const next: Record<string, ChatMessage[]> = {}
+          mapped.forEach((session, idx) => {
+            next[session.id] = [{
+              id: `bootstrap-${session.id}`,
+              role: 'assistant',
+              content: idx === 0
+                ? '会话已从后端加载完成，你可以直接进行知识库构建与召回测试。'
+                : '会话已加载，可继续测试知识库与召回流程。',
+            }]
+          })
+          return next
+        })
+        setRecallStateBySession(() => {
+          const next: Record<string, SessionRecallState> = {}
+          mapped.forEach((session) => {
+            next[session.id] = { ...defaultSessionRecallState }
+          })
+          return next
+        })
+        const kbEntries = await Promise.all(mapped.map(async (session) => {
+          try {
+            const kb = await request<BackendKB | null>(`/sessions/${session.id}/knowledge-base`)
+            return [session.id, kb ? mapKnowledgeBase(kb) : null] as const
+          } catch {
+            return [session.id, null] as const
+          }
+        }))
+        setKnowledgeBaseBySession(Object.fromEntries(kbEntries))
+      } catch (error) {
+        console.error(error)
+      }
+    }
+    void bootstrap()
   }, [])
 
   const filteredSessions = sessions.filter((session) =>
@@ -354,7 +388,7 @@ function App() {
     })
   }
 
-  const handleCreateSession = () => {
+  const handleCreateSession = async () => {
     const existingDraft = sessions.find((session) => session.isDraft)
 
     if (existingDraft) {
@@ -362,36 +396,45 @@ function App() {
       return
     }
 
-    const newSession: ChatSession = {
-      id: `session-${Date.now()}`,
-      title: '新会话',
-      updatedAt: '刚刚',
-      isDraft: true,
+    try {
+      const created = await request<BackendSession>('/sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: '新会话' }),
+      })
+      const newSession = mapSession(created)
+      setSessions((previous) => [newSession, ...previous])
+      setMessagesBySession((previous) => ({
+        ...previous,
+        [newSession.id]: [
+          {
+            id: `msg-${Date.now()}-assistant`,
+            role: 'assistant',
+            content: '这是一个空白新会话，请输入你的第一个问题开始。',
+          },
+        ],
+      }))
+      setKnowledgeBaseBySession((previous) => ({
+        ...previous,
+        [newSession.id]: null,
+      }))
+      setRecallStateBySession((previous) => ({
+        ...previous,
+        [newSession.id]: { ...defaultSessionRecallState },
+      }))
+      setActiveSessionId(newSession.id)
+    } catch (error) {
+      setBuildFormError(error instanceof Error ? error.message : '创建会话失败')
     }
-
-    setSessions((previous) => [newSession, ...previous])
-    setMessagesBySession((previous) => ({
-      ...previous,
-      [newSession.id]: [
-        {
-          id: `msg-${Date.now()}-assistant`,
-          role: 'assistant',
-          content: '这是一个空白新会话，请输入你的第一个问题开始。',
-        },
-      ],
-    }))
-    setKnowledgeBaseBySession((previous) => ({
-      ...previous,
-      [newSession.id]: null,
-    }))
-    setRecallStateBySession((previous) => ({
-      ...previous,
-      [newSession.id]: { ...defaultSessionRecallState },
-    }))
-    setActiveSessionId(newSession.id)
   }
 
-  const handleDeleteSession = (sessionId: string) => {
+  const handleDeleteSession = async (sessionId: string) => {
+    try {
+      await request<{ session_id: string }>(`/sessions/${sessionId}`, { method: 'DELETE' })
+    } catch (error) {
+      setBuildFormError(error instanceof Error ? error.message : '删除会话失败')
+      return
+    }
     const remaining = sessions.filter((session) => session.id !== sessionId)
     setSessions(remaining)
     setMessagesBySession((previous) => {
@@ -475,14 +518,42 @@ function App() {
     }
 
     try {
-      await new Promise((resolve) => setTimeout(resolve, 700))
       const replyBase = buildAssistantReply(normalized)
-      const citations =
-        chatQueryMode !== 'none' && activeKnowledgeBase
-          ? createMockRecallResults(normalized, chatQueryMode, chatTopN, chatTopK)
-          : { initial: [] as RecallChunk[], reranked: [] as RecallChunk[] }
-      const topKCitations = citations.reranked.slice(0, Math.max(1, Math.min(chatTopK, 3)))
-      const topNCitations = citations.initial.slice(0, Math.max(1, chatTopN))
+      let topKCitations: RecallChunk[] = []
+      let topNCitations: RecallChunk[] = []
+      if (chatQueryMode !== 'none' && activeKnowledgeBase) {
+        const retrieved = await request<{
+          initial_results: Array<{
+            chunk_id: string
+            title: string
+            source: string
+            score: number
+            content: string
+            channel: 'vector' | 'bm25' | 'rerank'
+            hit_mode: string
+          }>
+          final_results: Array<{
+            chunk_id: string
+            title: string
+            source: string
+            score: number
+            content: string
+            channel: 'vector' | 'bm25' | 'rerank'
+            hit_mode: string
+          }>
+        }>(`/knowledge-bases/${activeKnowledgeBase.knowledgeBaseId}/retrieve-test`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: normalized,
+            mode: chatQueryMode,
+            top_n: chatTopN,
+            top_k: chatTopK,
+          }),
+        })
+        topNCitations = retrieved.initial_results.map(mapRetrieveChunk)
+        topKCitations = retrieved.final_results.map(mapRetrieveChunk)
+      }
       const citedReply = buildCitedReply(replyBase, chatQueryMode, chatTopN, chatTopK, topKCitations)
       setMessagesBySession((previous) => ({
         ...previous,
@@ -526,87 +597,40 @@ function App() {
     }
   }
 
-  const finishBuild = (appendFile = false) => {
-    if (!selectedFile || !activeSessionId) {
-      return
-    }
-    if (appendFile && activeKnowledgeBase) {
-      setKnowledgeBaseBySession((previous) => {
-        const current = previous[activeSessionId]
-        if (!current) {
-          return previous
-        }
-        return {
-          ...previous,
-          [activeSessionId]: {
-            ...current,
-            files: current.files.includes(selectedFile.name)
-              ? current.files
-              : [...current.files, selectedFile.name],
-          },
-        }
-      })
-      return
-    }
+  const stageToStepIndex: Record<BuildTask['stage'], number> = {
+    uploaded: 0,
+    chunking: 1,
+    indexing: 2,
+    vectorizing: 3,
+    done: 3,
+    failed: 3,
+  }
 
+  const syncSessionKnowledgeBase = async (sessionId: string) => {
+    const kb = await request<BackendKB | null>(`/sessions/${sessionId}/knowledge-base`)
     setKnowledgeBaseBySession((previous) => ({
       ...previous,
-      [activeSessionId]: {
-        ...buildForm,
-        knowledgeBaseName: buildForm.knowledgeBaseName.trim(),
-        files: [selectedFile.name],
-      },
-    }))
-    updateActiveRecallState((previous) => ({
-      ...previous,
-      queryInput: '',
-      lastQuery: '',
-      initialResults: [],
-      rerankedResults: [],
+      [sessionId]: kb ? mapKnowledgeBase(kb) : null,
     }))
   }
 
-  const startBuildFlow = (appendFile = false) => {
-    setBuildFormError('')
-    setShowUploadWizard(false)
-    setIsBuilding(true)
-    setIsBuildMinimized(false)
-    setBuildStageIndex(0)
-
-    const shouldFail = appendFile
-      ? /fail|失败/i.test(selectedFile?.name ?? '')
-      : /fail|失败/i.test(buildForm.knowledgeBaseName) || /fail|失败/i.test(selectedFile?.name ?? '')
-
-    const tick = (index: number) => {
-      setBuildStageIndex(index)
-      if (index >= buildStages.length - 1) {
-        buildTimerRef.current = window.setTimeout(() => {
-          setIsBuilding(false)
-          setIsBuildMinimized(false)
-          if (shouldFail) {
-            setShowBuildFailModal(true)
-            if (!appendFile) {
-              if (activeSessionId) {
-                setKnowledgeBaseBySession((previous) => ({
-                  ...previous,
-                  [activeSessionId]: null,
-                }))
-              }
-            }
-            return
-          }
-          finishBuild(appendFile)
-        }, 850)
-        return
+  const pollBuildTask = async (taskId: string) => {
+    let latest: BuildTask | null = null
+    for (let i = 0; i < 120; i += 1) {
+      const task = await request<BuildTask>(`/build-tasks/${taskId}`)
+      latest = task
+      setBuildStageIndex(stageToStepIndex[task.stage])
+      if (task.stage === 'done' || task.stage === 'failed') {
+        return task
       }
-
-      buildTimerRef.current = window.setTimeout(() => tick(index + 1), 900)
+      await new Promise((resolve) => {
+        buildTimerRef.current = window.setTimeout(resolve, 1000)
+      })
     }
-
-    tick(0)
+    throw new Error(latest ? `构建超时，当前阶段：${latest.stage}` : '构建超时')
   }
 
-  const handleStartBuild = () => {
+  const handleStartBuild = async () => {
     const error = validateBuildForm(buildForm)
     if (!selectedFile) {
       setBuildFormError('请先上传一个文档文件。')
@@ -616,10 +640,52 @@ function App() {
       setBuildFormError(error)
       return
     }
-    startBuildFlow(false)
+    if (!activeSessionId) {
+      setBuildFormError('请先选择会话')
+      return
+    }
+
+    try {
+      setBuildFormError('')
+      setShowUploadWizard(false)
+      setIsBuilding(true)
+      setIsBuildMinimized(false)
+      setBuildStageIndex(0)
+
+      const formData = new FormData()
+      formData.append('session_id', activeSessionId)
+      formData.append('name', buildForm.knowledgeBaseName.trim())
+      formData.append('chunk_size', String(buildForm.chunkSize))
+      formData.append('chunk_overlap', String(buildForm.chunkOverlap))
+      formData.append('file', selectedFile)
+
+      const created = await request<{ knowledge_base_id: string; task_id: string }>('/knowledge-bases', {
+        method: 'POST',
+        body: formData,
+      })
+      const task = await pollBuildTask(created.task_id)
+      await syncSessionKnowledgeBase(activeSessionId)
+      if (task.stage === 'failed') {
+        setShowBuildFailModal(true)
+      } else {
+        updateActiveRecallState((previous) => ({
+          ...previous,
+          queryInput: '',
+          lastQuery: '',
+          initialResults: [],
+          rerankedResults: [],
+        }))
+      }
+    } catch (buildError) {
+      setBuildFormError(buildError instanceof Error ? buildError.message : '创建知识库失败')
+      setShowBuildFailModal(true)
+    } finally {
+      setIsBuilding(false)
+      setIsBuildMinimized(false)
+    }
   }
 
-  const handleAppendFile = () => {
+  const handleAppendFile = async () => {
     if (!selectedFile) {
       setBuildFormError('请先选择一个文档。')
       return
@@ -628,7 +694,37 @@ function App() {
       setBuildFormError('请先创建知识库。')
       return
     }
-    startBuildFlow(true)
+
+    try {
+      setBuildFormError('')
+      setShowUploadWizard(false)
+      setIsBuilding(true)
+      setIsBuildMinimized(false)
+      setBuildStageIndex(0)
+
+      const formData = new FormData()
+      formData.append('file', selectedFile)
+      const appended = await request<{ knowledge_base_id: string; task_id: string }>(
+        `/knowledge-bases/${activeKnowledgeBase.knowledgeBaseId}/files`,
+        {
+          method: 'POST',
+          body: formData,
+        },
+      )
+      const task = await pollBuildTask(appended.task_id)
+      if (activeSessionId) {
+        await syncSessionKnowledgeBase(activeSessionId)
+      }
+      if (task.stage === 'failed') {
+        setShowBuildFailModal(true)
+      }
+    } catch (appendError) {
+      setBuildFormError(appendError instanceof Error ? appendError.message : '追加文档失败')
+      setShowBuildFailModal(true)
+    } finally {
+      setIsBuilding(false)
+      setIsBuildMinimized(false)
+    }
   }
 
   const handleRecallTest = async () => {
@@ -652,20 +748,69 @@ function App() {
       return
     }
     updateActiveRecallState((previous) => ({ ...previous, isLoading: true }))
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    const { initial, reranked } = createMockRecallResults(
-      normalized,
-      activeRecallState.queryMode,
-      activeRecallState.topN,
-      activeRecallState.topK,
-    )
-    updateActiveRecallState((previous) => ({
-      ...previous,
-      initialResults: initial,
-      rerankedResults: reranked,
-      lastQuery: normalized,
-      isLoading: false,
-    }))
+    try {
+      const data = await request<{
+        query: string
+        initial_results: Array<{
+          chunk_id: string
+          title: string
+          source: string
+          score: number
+          content: string
+          channel: 'vector' | 'bm25' | 'rerank'
+          hit_mode: string
+        }>
+        final_results: Array<{
+          chunk_id: string
+          title: string
+          source: string
+          score: number
+          content: string
+          channel: 'vector' | 'bm25' | 'rerank'
+          hit_mode: string
+        }>
+      }>(`/knowledge-bases/${activeKnowledgeBase.knowledgeBaseId}/retrieve-test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: normalized,
+          mode: activeRecallState.queryMode,
+          top_n: activeRecallState.topN,
+          top_k: activeRecallState.topK,
+        }),
+      })
+      updateActiveRecallState((previous) => ({
+        ...previous,
+        initialResults: data.initial_results.map(mapRetrieveChunk),
+        rerankedResults: data.final_results.map(mapRetrieveChunk),
+        lastQuery: normalized,
+        isLoading: false,
+      }))
+    } catch (error) {
+      updateActiveRecallState((previous) => ({ ...previous, isLoading: false }))
+      setBuildFormError(error instanceof Error ? error.message : '召回测试失败')
+    }
+  }
+
+  const handleOpenChunk = async (chunk: RecallChunk) => {
+    if (!activeKnowledgeBase) {
+      setSelectedChunk(chunk)
+      return
+    }
+    try {
+      const detail = await request<{
+        chunk_id: string
+        title: string
+        source: string
+        score: number
+        content: string
+        channel: 'vector' | 'bm25' | 'rerank'
+        hit_mode: string
+      }>(`/knowledge-bases/${activeKnowledgeBase.knowledgeBaseId}/chunks/${chunk.id}`)
+      setSelectedChunk(mapRetrieveChunk(detail))
+    } catch {
+      setSelectedChunk(chunk)
+    }
   }
 
   return (
@@ -726,7 +871,7 @@ function App() {
               )}
             </div>
 
-            <Button variant="secondary" fullWidth onClick={handleCreateSession}>
+            <Button variant="secondary" fullWidth onClick={() => void handleCreateSession()}>
               新建会话
             </Button>
           </Card>
@@ -751,11 +896,12 @@ function App() {
                             key={`${message.id}-k-${chunk.id}`}
                             type="button"
                             className="citation-dropdown-item"
-                            onClick={() => setSelectedChunk(chunk)}
+                            onClick={() => void handleOpenChunk(chunk)}
                             title={chunk.content}
                           >
                             <span className="citation-index">[{index + 1}]</span>
-                            <span>{truncateText(chunk.content, 30)}</span>
+                            <span className="citation-preview">{truncateText(chunk.content, 30)}</span>
+                            <span className="citation-score">相关性 {chunk.score.toFixed(4)}</span>
                           </button>
                         ))}
                       </div>
@@ -782,11 +928,12 @@ function App() {
                               key={`${message.id}-n-${chunk.id}`}
                               type="button"
                               className="citation-dropdown-item"
-                              onClick={() => setSelectedChunk(chunk)}
+                              onClick={() => void handleOpenChunk(chunk)}
                               title={chunk.content}
                             >
                               <span className="citation-index">[{index + 1}]</span>
-                              <span>{truncateText(chunk.content, 30)}</span>
+                              <span className="citation-preview">{truncateText(chunk.content, 30)}</span>
+                              <span className="citation-score">相关性 {chunk.score.toFixed(4)}</span>
                             </button>
                           ))}
                         </div>
@@ -933,36 +1080,25 @@ function App() {
                   {activeKnowledgeBase.files.length === 0 ? (
                     <p className="hint-line">暂无文件</p>
                   ) : (
-                    activeKnowledgeBase.files.map((fileName) => (
-                      <div key={fileName} className="kb-file-item">
-                        <span title={fileName}>{fileName}</span>
+                    activeKnowledgeBase.files.map((fileItem) => (
+                      <div key={fileItem.id} className="kb-file-item">
+                        <span title={fileItem.filename}>{fileItem.filename}</span>
                         <button
                           type="button"
-                          onClick={() =>
-                            setKnowledgeBaseBySession((previous) => {
-                              if (!activeSessionId) return previous
-                              const current = previous[activeSessionId]
-                              if (!current) return previous
-                              const nextFiles = current.files.filter((item) => item !== fileName)
-                              if (nextFiles.length === 0) {
-                                updateActiveRecallState((state) => ({
-                                  ...state,
-                                  initialResults: [],
-                                  rerankedResults: [],
-                                  lastQuery: '',
-                                  queryInput: '',
-                                }))
-                                return { ...previous, [activeSessionId]: null }
-                              }
-                              return {
-                                ...previous,
-                                [activeSessionId]: {
-                                  ...current,
-                                  files: nextFiles,
-                                },
-                              }
-                            })
-                          }
+                          onClick={async () => {
+                            if (!activeKnowledgeBase || !activeSessionId) {
+                              return
+                            }
+                            try {
+                              await request<{ knowledge_base_id: string; file_id: string }>(
+                                `/knowledge-bases/${activeKnowledgeBase.knowledgeBaseId}/files/${fileItem.id}`,
+                                { method: 'DELETE' },
+                              )
+                              await syncSessionKnowledgeBase(activeSessionId)
+                            } catch (error) {
+                              setBuildFormError(error instanceof Error ? error.message : '删除文件失败')
+                            }
+                          }}
                         >
                           删除
                         </button>
@@ -1104,7 +1240,7 @@ function App() {
                           key={chunk.id}
                           type="button"
                           className="recall-result-item"
-                          onClick={() => setSelectedChunk(chunk)}
+                          onClick={() => void handleOpenChunk(chunk)}
                         >
                           <div className="recall-result-head">
                             <span>{chunk.title}</span>
@@ -1123,7 +1259,7 @@ function App() {
                           key={chunk.id}
                           type="button"
                           className="initial-result-item"
-                          onClick={() => setSelectedChunk(chunk)}
+                          onClick={() => void handleOpenChunk(chunk)}
                         >
                           <div className="recall-result-head">
                             <span>{chunk.title}</span>
@@ -1176,7 +1312,7 @@ function App() {
           <Button
             onClick={() => {
               if (deleteTarget) {
-                handleDeleteSession(deleteTarget.id)
+                void handleDeleteSession(deleteTarget.id)
               }
               setDeleteTarget(null)
             }}
@@ -1222,7 +1358,7 @@ function App() {
                     return
                   }
                   if (uploadWizardMode === 'append') {
-                    handleAppendFile()
+                    void handleAppendFile()
                     return
                   }
                   setBuildFormError('')
@@ -1290,7 +1426,7 @@ function App() {
               <Button variant="secondary" onClick={() => setShowUploadWizard(false)}>
                 取消
               </Button>
-              <Button onClick={handleStartBuild}>开始构建</Button>
+              <Button onClick={() => void handleStartBuild()}>开始构建</Button>
             </div>
           </div>
         )}
@@ -1308,21 +1444,32 @@ function App() {
             取消
           </Button>
           <Button
-            onClick={() => {
-              if (activeSessionId) {
+            onClick={async () => {
+              if (!activeSessionId || !activeKnowledgeBase) {
+                setDeleteKnowledgeBaseConfirmOpen(false)
+                return
+              }
+              try {
+                await request<{ knowledge_base_id: string }>(
+                  `/knowledge-bases/${activeKnowledgeBase.knowledgeBaseId}`,
+                  { method: 'DELETE' },
+                )
                 setKnowledgeBaseBySession((previous) => ({
                   ...previous,
                   [activeSessionId]: null,
                 }))
+                updateActiveRecallState((previous) => ({
+                  ...previous,
+                  initialResults: [],
+                  rerankedResults: [],
+                  lastQuery: '',
+                  queryInput: '',
+                }))
+              } catch (error) {
+                setBuildFormError(error instanceof Error ? error.message : '删除知识库失败')
+              } finally {
+                setDeleteKnowledgeBaseConfirmOpen(false)
               }
-              updateActiveRecallState((previous) => ({
-                ...previous,
-                initialResults: [],
-                rerankedResults: [],
-                lastQuery: '',
-                queryInput: '',
-              }))
-              setDeleteKnowledgeBaseConfirmOpen(false)
             }}
           >
             确认删除

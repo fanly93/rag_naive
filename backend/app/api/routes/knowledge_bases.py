@@ -231,6 +231,27 @@ def retrieve_test(knowledge_base_id: str, payload: RetrieveTestRequest) -> ApiRe
         )
 
     # Persist detail cache for both right panel and middle citation popups.
-    knowledge_base_service.set_chunk_details(knowledge_base_id=knowledge_base_id, chunks=all_chunks)
+    detail_by_id: dict[str, dict[str, str | float]] = {}
+    raw_by_id = {str(item["chunk_id"]): item for item in all_chunks}
+    for result in initial + final:
+        raw = raw_by_id.get(result.chunk_id)
+        if raw is None:
+            continue
+        detail_by_id[result.chunk_id] = {
+            "chunk_id": result.chunk_id,
+            "title": result.title,
+            "source": result.source,
+            "score": result.score,
+            "content": result.content,
+            "channel": result.channel,
+            "hit_mode": result.hit_mode,
+            "vector_score": float(raw["vector_score"]),
+            "bm25_score": float(raw["bm25_score"]),
+            "hybrid_score": float(raw["hybrid_score"]),
+        }
+    knowledge_base_service.set_chunk_details(
+        knowledge_base_id=knowledge_base_id,
+        chunks=list(detail_by_id.values()),
+    )
 
     return ApiResponse(data=RetrieveTestData(query=payload.query, initial_results=initial, final_results=final))
