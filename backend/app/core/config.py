@@ -14,10 +14,20 @@ class Settings(BaseSettings):
 
     app_name: str = "Agentic RAG Backend"
     api_prefix: str = "/api/v1"
+    default_chat_provider: str = "deepseek"
+    model: str = "deepseek-chat"
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_chat_model: str = "deepseek-chat"
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_chat_model: str = "gpt-4o-mini"
     upload_root: str = str(Path(__file__).resolve().parents[2] / "data" / "uploads")
     milvus_url: str = str(Path(__file__).resolve().parents[2] / "data" / "milvus.db")
     embedding_dim: int = 1024
     dashscope_api_key: str = ""
+    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    dashscope_chat_model: str = "qwen-plus"
     embedding_model_name: str = "text-embedding-v4"
     rerank_model_name: str = "qwen3-rerank"
     rrf_k: int = Field(default=60, ge=1, le=1000)

@@ -28,6 +28,7 @@ type SessionError = {
 }
 
 type QueryMode = 'none' | 'vector' | 'hybrid' | 'hybrid_rerank'
+type ChatProvider = 'deepseek' | 'openai' | 'dashscope'
 
 type BuildForm = {
   knowledgeBaseName: string
@@ -142,14 +143,6 @@ function truncateTitle(text: string) {
   return normalized.length > 20 ? `${normalized.slice(0, 20)}...` : normalized
 }
 
-function buildAssistantReply(query: string) {
-  if (/失败|error|异常/i.test(query)) {
-    throw new Error('网络波动导致本次响应失败，请稍后重试。')
-  }
-
-  return `已收到你的问题：「${query}」。Phase 2 当前为前端本地模拟回复，后续 Phase 3/4 将接入真实 RAG 与召回链路。`
-}
-
 function getQueryModeLabel(mode: QueryMode) {
   if (mode === 'none') return '不使用知识库'
   if (mode === 'vector') return '仅向量检索'
@@ -247,22 +240,6 @@ function mapRetrieveChunk(item: {
   }
 }
 
-function buildCitedReply(
-  baseReply: string,
-  mode: QueryMode,
-  topN: number,
-  topK: number,
-  citations: RecallChunk[],
-) {
-  if (mode === 'none' || citations.length === 0) {
-    return `${baseReply}\n\n本次模式：不使用知识库（纯生成回答）。`
-  }
-
-  const markers = citations.slice(0, 3).map((_, index) => `[${index + 1}]`).join('')
-
-  return `${baseReply}\n\n本次模式：${getQueryModeLabel(mode)}（Top-N=${topN}, Top-K=${topK}）。\n\n引用标记：${markers}`
-}
-
 function App() {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState('')
@@ -289,6 +266,8 @@ function App() {
   const [chatQueryMode, setChatQueryMode] = useState<QueryMode>('hybrid_rerank')
   const [chatTopN, setChatTopN] = useState(20)
   const [chatTopK, setChatTopK] = useState(3)
+  const [chatProvider, setChatProvider] = useState<ChatProvider>('deepseek')
+  const [chatModel, setChatModel] = useState('')
   const [chatAdvancedOpen, setChatAdvancedOpen] = useState(false)
   const [expandedTopNByMessage, setExpandedTopNByMessage] = useState<Record<string, boolean>>({})
   const [recallStateBySession, setRecallStateBySession] =
@@ -518,43 +497,47 @@ function App() {
     }
 
     try {
-      const replyBase = buildAssistantReply(normalized)
-      let topKCitations: RecallChunk[] = []
-      let topNCitations: RecallChunk[] = []
-      if (chatQueryMode !== 'none' && activeKnowledgeBase) {
-        const retrieved = await request<{
-          initial_results: Array<{
-            chunk_id: string
-            title: string
-            source: string
-            score: number
-            content: string
-            channel: 'vector' | 'bm25' | 'rerank'
-            hit_mode: string
-          }>
-          final_results: Array<{
-            chunk_id: string
-            title: string
-            source: string
-            score: number
-            content: string
-            channel: 'vector' | 'bm25' | 'rerank'
-            hit_mode: string
-          }>
-        }>(`/knowledge-bases/${activeKnowledgeBase.knowledgeBaseId}/retrieve-test`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: normalized,
-            mode: chatQueryMode,
-            top_n: chatTopN,
-            top_k: chatTopK,
-          }),
-        })
-        topNCitations = retrieved.initial_results.map(mapRetrieveChunk)
-        topKCitations = retrieved.final_results.map(mapRetrieveChunk)
-      }
-      const citedReply = buildCitedReply(replyBase, chatQueryMode, chatTopN, chatTopK, topKCitations)
+      const completion = await request<{
+        answer: string
+        provider: ChatProvider
+        model: string
+        mode: QueryMode
+        top_n: number
+        top_k: number
+        initial_results: Array<{
+          chunk_id: string
+          title: string
+          source: string
+          score: number
+          content: string
+          channel: 'vector' | 'bm25' | 'rerank'
+          hit_mode: string
+        }>
+        final_results: Array<{
+          chunk_id: string
+          title: string
+          source: string
+          score: number
+          content: string
+          channel: 'vector' | 'bm25' | 'rerank'
+          hit_mode: string
+        }>
+      }>('/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: activeSessionId,
+          query: normalized,
+          mode: chatQueryMode,
+          top_n: chatTopN,
+          top_k: chatTopK,
+          knowledge_base_id: activeKnowledgeBase?.knowledgeBaseId ?? null,
+          provider: chatProvider,
+          model: chatModel.trim() || null,
+        }),
+      })
+      const topNCitations = completion.initial_results.map(mapRetrieveChunk)
+      const topKCitations = completion.final_results.map(mapRetrieveChunk)
       setMessagesBySession((previous) => ({
         ...previous,
         [activeSessionId]: (previous[activeSessionId] ?? []).map((message) =>
@@ -562,7 +545,7 @@ function App() {
             ? {
                 id: `msg-${Date.now()}-assistant`,
                 role: 'assistant',
-                content: citedReply,
+                content: completion.answer,
                 topKCitations,
                 topNCitations,
               }
@@ -1011,6 +994,26 @@ function App() {
                       min={1}
                       value={chatTopK}
                       onChange={(event) => setChatTopK(Math.max(1, Number(event.target.value || 1)))}
+                    />
+                  </label>
+                  <label className="advanced-field">
+                    <span>模型提供商</span>
+                    <select
+                      className="query-mode-select"
+                      value={chatProvider}
+                      onChange={(event) => setChatProvider(event.target.value as ChatProvider)}
+                    >
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="dashscope">DashScope</option>
+                    </select>
+                  </label>
+                  <label className="advanced-field">
+                    <span>模型名（可选覆盖）</span>
+                    <Input
+                      placeholder="留空使用后端默认模型"
+                      value={chatModel}
+                      onChange={(event) => setChatModel(event.target.value)}
                     />
                   </label>
                 </div>

@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes.chunks import router as chunks_router
 from app.api.routes.build_tasks import router as build_tasks_router
+from app.api.routes.chat import router as chat_router
 from app.api.routes.health import router as health_router
 from app.api.routes.knowledge_bases import router as knowledge_bases_router
 from app.api.routes.sessions import router as sessions_router
@@ -50,3 +51,4 @@ app.include_router(sessions_router, prefix=settings.api_prefix)
 app.include_router(knowledge_bases_router, prefix=settings.api_prefix)
 app.include_router(build_tasks_router, prefix=settings.api_prefix)
 app.include_router(chunks_router, prefix=settings.api_prefix)
+app.include_router(chat_router, prefix=settings.api_prefix)
