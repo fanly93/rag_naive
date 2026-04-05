@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from typing import Literal
+from typing import Iterator
 
 import httpx
 
@@ -68,6 +70,19 @@ class ChatService:
             },
         ]
 
+    def _extract_content_text(self, content: object) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return ""
+
     def complete(
         self,
         query: str,
@@ -102,14 +117,69 @@ class ChatService:
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError("chat completion response missing choices")
-        content = (
-            choices[0].get("message", {}).get("content")
-            if isinstance(choices[0], dict)
-            else None
-        )
-        if not content or not isinstance(content, str):
+        content = ""
+        if isinstance(choices[0], dict):
+            content = self._extract_content_text(choices[0].get("message", {}).get("content"))
+        if not content:
             raise RuntimeError("chat completion response missing content")
         return content.strip(), selected_provider, selected_model
+
+    def stream_complete(
+        self,
+        query: str,
+        context_chunks: list[tuple[int, str]],
+        provider: ChatProvider | None = None,
+        model: str | None = None,
+    ) -> tuple[Iterator[str], ChatProvider, str]:
+        selected_provider = provider or self._default_provider()
+        api_key, base_url, default_model = self._provider_config(selected_provider)
+        if not api_key:
+            raise ValueError(f"{selected_provider} API key is required.")
+        if not base_url:
+            raise ValueError(f"{selected_provider} base url is required.")
+        selected_model = model.strip() if model else default_model
+        if not selected_model:
+            raise ValueError(f"{selected_provider} model is required.")
+
+        context_blocks = [f"[{index}] {content}" for index, content in context_chunks]
+        payload = {
+            "model": selected_model,
+            "messages": self._build_messages(query=query, context_blocks=context_blocks),
+            "temperature": 0.2,
+            "stream": True,
+        }
+        endpoint = f"{base_url.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+        def _iter() -> Iterator[str]:
+            with httpx.Client(timeout=120.0) as client:
+                with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                    if response.status_code >= 400:
+                        body = response.read().decode("utf-8", errors="ignore")
+                        raise RuntimeError(
+                            f"chat stream failed: {response.status_code} - {body}"
+                        )
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if raw == "[DONE]":
+                            break
+                        try:
+                            item = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = item.get("choices") or []
+                        if not choices or not isinstance(choices[0], dict):
+                            continue
+                        delta = choices[0].get("delta", {})
+                        text = self._extract_content_text(delta.get("content")) if isinstance(delta, dict) else ""
+                        if text:
+                            yield text
+
+        return _iter(), selected_provider, selected_model
 
 
 chat_service = ChatService()

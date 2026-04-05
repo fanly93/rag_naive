@@ -240,6 +240,123 @@ function mapRetrieveChunk(item: {
   }
 }
 
+type StreamMetaPayload = {
+  provider: ChatProvider
+  model: string
+  mode: QueryMode
+  top_n: number
+  top_k: number
+  initial_results: Array<{
+    chunk_id: string
+    title: string
+    source: string
+    score: number
+    content: string
+    channel: 'vector' | 'bm25' | 'rerank'
+    hit_mode: string
+  }>
+  final_results: Array<{
+    chunk_id: string
+    title: string
+    source: string
+    score: number
+    content: string
+    channel: 'vector' | 'bm25' | 'rerank'
+    hit_mode: string
+  }>
+}
+
+async function streamChatCompletions(
+  payload: {
+    session_id: string
+    query: string
+    mode: QueryMode
+    top_n: number
+    top_k: number
+    knowledge_base_id: string | null
+    provider: ChatProvider
+    model: string | null
+  },
+  onMeta: (meta: StreamMetaPayload) => void,
+  onDelta: (token: string) => void,
+) {
+  const response = await fetch(`${API_PREFIX}/chat/completions/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    let message = `请求失败: ${response.status}`
+    try {
+      const errorPayload = (await response.json()) as { message?: string; detail?: { message?: string } }
+      message = errorPayload.detail?.message ?? errorPayload.message ?? message
+    } catch {
+      // no-op: keep default message
+    }
+    throw new Error(message)
+  }
+  if (!response.body) {
+    throw new Error('流式响应不可用')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let finalAnswer = ''
+  let topNCitations: RecallChunk[] = []
+  let topKCitations: RecallChunk[] = []
+
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) {
+      break
+    }
+    buffer += decoder.decode(value, { stream: true })
+    let separatorIndex = buffer.indexOf('\n\n')
+    while (separatorIndex >= 0) {
+      const block = buffer.slice(0, separatorIndex)
+      buffer = buffer.slice(separatorIndex + 2)
+      const lines = block.split('\n')
+      let event = ''
+      let data = ''
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          event = line.slice(6).trim()
+        } else if (line.startsWith('data:')) {
+          data += line.slice(5).trim()
+        }
+      }
+      if (!event || !data) {
+        separatorIndex = buffer.indexOf('\n\n')
+        continue
+      }
+      const parsed = JSON.parse(data) as Record<string, unknown>
+      if (event === 'meta') {
+        const meta = parsed as unknown as StreamMetaPayload
+        topNCitations = meta.initial_results.map(mapRetrieveChunk)
+        topKCitations = meta.final_results.map(mapRetrieveChunk)
+        onMeta(meta)
+      } else if (event === 'delta') {
+        const token = typeof parsed.content === 'string' ? parsed.content : ''
+        if (token) {
+          finalAnswer += token
+          onDelta(token)
+        }
+      } else if (event === 'done') {
+        if (typeof parsed.answer === 'string' && parsed.answer.trim()) {
+          finalAnswer = parsed.answer
+        }
+      } else if (event === 'error') {
+        const message = typeof parsed.message === 'string' ? parsed.message : '流式生成失败'
+        throw new Error(message)
+      }
+      separatorIndex = buffer.indexOf('\n\n')
+    }
+  }
+
+  return { answer: finalAnswer, topNCitations, topKCitations }
+}
+
 function App() {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState('')
@@ -457,6 +574,7 @@ function App() {
       return
     }
 
+    const sessionId = activeSessionId
     const loadingMessageId = `msg-${Date.now()}-loading`
 
     setSessionErrorMap((previous) => ({ ...previous, [activeSessionId]: undefined }))
@@ -464,8 +582,8 @@ function App() {
     if (!options?.fromRetry) {
       setMessagesBySession((previous) => ({
         ...previous,
-        [activeSessionId]: [
-          ...(previous[activeSessionId] ?? []),
+        [sessionId]: [
+          ...(previous[sessionId] ?? []),
           { id: `msg-${Date.now()}-user`, role: 'user', content: normalized },
         ],
       }))
@@ -473,12 +591,12 @@ function App() {
 
     setMessagesBySession((previous) => ({
       ...previous,
-      [activeSessionId]: [
-        ...(previous[activeSessionId] ?? []),
+      [sessionId]: [
+        ...(previous[sessionId] ?? []),
         {
           id: loadingMessageId,
           role: 'assistant',
-          content: '正在生成回答...',
+          content: '',
           isLoading: true,
         },
       ],
@@ -487,67 +605,51 @@ function App() {
     if (queryInput === normalized) {
       setQueryInput('')
     }
-    setSendingSessionId(activeSessionId)
+    setSendingSessionId(sessionId)
 
-    const currentSession = sessions.find((session) => session.id === activeSessionId)
+    const currentSession = sessions.find((session) => session.id === sessionId)
     if (currentSession?.isDraft) {
-      touchSession(activeSessionId, truncateTitle(normalized))
+      touchSession(sessionId, truncateTitle(normalized))
     } else {
-      touchSession(activeSessionId)
+      touchSession(sessionId)
     }
 
     try {
-      const completion = await request<{
-        answer: string
-        provider: ChatProvider
-        model: string
-        mode: QueryMode
-        top_n: number
-        top_k: number
-        initial_results: Array<{
-          chunk_id: string
-          title: string
-          source: string
-          score: number
-          content: string
-          channel: 'vector' | 'bm25' | 'rerank'
-          hit_mode: string
-        }>
-        final_results: Array<{
-          chunk_id: string
-          title: string
-          source: string
-          score: number
-          content: string
-          channel: 'vector' | 'bm25' | 'rerank'
-          hit_mode: string
-        }>
-      }>('/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: activeSessionId,
-          query: normalized,
-          mode: chatQueryMode,
-          top_n: chatTopN,
-          top_k: chatTopK,
-          knowledge_base_id: activeKnowledgeBase?.knowledgeBaseId ?? null,
-          provider: chatProvider,
-          model: chatModel.trim() || null,
-        }),
+      const streamed = await streamChatCompletions({
+        session_id: sessionId,
+        query: normalized,
+        mode: chatQueryMode,
+        top_n: chatTopN,
+        top_k: chatTopK,
+        knowledge_base_id: activeKnowledgeBase?.knowledgeBaseId ?? null,
+        provider: chatProvider,
+        model: chatModel.trim() || null,
+      }, () => {
+        // meta currently used for citations; no extra UI action needed here
+      }, (token) => {
+        setMessagesBySession((previous) => ({
+          ...previous,
+          [sessionId]: (previous[sessionId] ?? []).map((message) =>
+            message.id === loadingMessageId
+              ? {
+                  ...message,
+                  content: `${message.content}${token}`,
+                }
+              : message,
+          ),
+        }))
       })
-      const topNCitations = completion.initial_results.map(mapRetrieveChunk)
-      const topKCitations = completion.final_results.map(mapRetrieveChunk)
+
       setMessagesBySession((previous) => ({
         ...previous,
-        [activeSessionId]: (previous[activeSessionId] ?? []).map((message) =>
+        [sessionId]: (previous[sessionId] ?? []).map((message) =>
           message.id === loadingMessageId
             ? {
                 id: `msg-${Date.now()}-assistant`,
                 role: 'assistant',
-                content: completion.answer,
-                topKCitations,
-                topNCitations,
+                content: streamed.answer || '未返回文本内容。',
+                topKCitations: streamed.topKCitations,
+                topNCitations: streamed.topNCitations,
               }
             : message,
         ),
@@ -557,7 +659,7 @@ function App() {
         error instanceof Error ? error.message : '发生未知错误，请稍后再试。'
       setMessagesBySession((previous) => ({
         ...previous,
-        [activeSessionId]: (previous[activeSessionId] ?? []).map((item) =>
+        [sessionId]: (previous[sessionId] ?? []).map((item) =>
           item.id === loadingMessageId
             ? {
                 id: `msg-${Date.now()}-assistant-error`,
@@ -570,7 +672,7 @@ function App() {
       }))
       setSessionErrorMap((previous) => ({
         ...previous,
-        [activeSessionId]: {
+        [sessionId]: {
           failedQuery: normalized,
           message,
         },
@@ -868,7 +970,11 @@ function App() {
                   <div
                     className={`chat-bubble ${message.role} ${message.isError ? 'is-error' : ''}`}
                   >
-                    {message.isLoading ? <span className="typing-dots">思考中...</span> : message.content}
+                    {message.isLoading
+                      ? (message.content
+                        ? `${message.content}▌`
+                        : <span className="typing-dots">思考中...</span>)
+                      : message.content}
                   </div>
                   {message.role === 'assistant' && message.topKCitations && message.topKCitations.length > 0 ? (
                     <div className="citation-panel">
