@@ -8,7 +8,7 @@ from llama_index.vector_stores.milvus import MilvusVectorStore
 
 from app.core.config import get_settings
 from app.schemas.knowledge_base import KnowledgeBase
-from app.services.rag_embedding import DeterministicEmbedding
+from app.services.rag_embedding import create_embedding_model
 
 
 class RagIngestService:
@@ -67,7 +67,7 @@ class RagIngestService:
         if not file_paths:
             raise ValueError("knowledge base has no files on disk")
 
-        Settings.embed_model = DeterministicEmbedding(dimension=self._settings.embedding_dim)
+        Settings.embed_model = create_embedding_model()
 
         documents = self.load_documents(file_paths=file_paths)
         splitter = SentenceSplitter(chunk_size=kb.chunk_size, chunk_overlap=kb.chunk_overlap)
