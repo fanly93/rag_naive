@@ -10,6 +10,10 @@ from app.schemas.session import Session, SessionCreateRequest
 
 
 class SessionService:
+    def _truncate_title_from_query(self, query: str) -> str:
+        normalized = " ".join(query.split()).strip()
+        return f"{normalized[:20]}..." if len(normalized) > 20 else normalized
+
     def _to_schema(self, row: SessionModel) -> Session:
         updated_at = row.updated_at
         if updated_at.tzinfo is None:
@@ -69,6 +73,19 @@ class SessionService:
             if row is None:
                 return False
             row.knowledge_base_id = knowledge_base_id
+            row.updated_at = datetime.now(timezone.utc)
+            db.add(row)
+            db.commit()
+            return True
+
+    def touch_by_query(self, session_id: str, query: str) -> bool:
+        with SessionLocal() as db:
+            row = db.get(SessionModel, session_id)
+            if row is None:
+                return False
+            if row.is_draft:
+                row.title = self._truncate_title_from_query(query) or row.title
+                row.is_draft = False
             row.updated_at = datetime.now(timezone.utc)
             db.add(row)
             db.commit()

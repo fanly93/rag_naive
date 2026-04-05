@@ -34,6 +34,8 @@ def chat_completions(payload: ChatCompletionRequest) -> ApiResponse[ChatCompleti
             detail={"code": 1001, "message": "top_k must be <= top_n", "data": {"top_n": payload.top_n, "top_k": payload.top_k}},
         )
 
+    session_service.touch_by_query(session_id=payload.session_id, query=payload.query)
+
     user_message = message_service.append_message(
         session_id=payload.session_id,
         role="user",
@@ -180,6 +182,8 @@ def chat_completions_stream(payload: ChatCompletionRequest) -> StreamingResponse
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": 1001, "message": "top_k must be <= top_n", "data": {"top_n": payload.top_n, "top_k": payload.top_k}},
         )
+
+    session_service.touch_by_query(session_id=payload.session_id, query=payload.query)
 
     user_message = message_service.append_message(
         session_id=payload.session_id,
