@@ -8,9 +8,12 @@ from app.schemas.knowledge_base import (
     KnowledgeBaseFileAppendData,
     KnowledgeBaseFileDeleteData,
 )
+from app.schemas.retrieval import RetrieveTestData
+from app.schemas.retrieval import RetrieveTestRequest
 from app.services.build_orchestrator_service import build_orchestrator_service
 from app.services.knowledge_base_service import knowledge_base_service
 from app.services.rag_ingest_service import rag_ingest_service
+from app.services.retrieval_service import retrieval_service
 from app.services.session_service import session_service
 
 router = APIRouter(prefix="/knowledge-bases", tags=["knowledge-bases"])
@@ -195,3 +198,39 @@ def get_knowledge_base(knowledge_base_id: str) -> ApiResponse[KnowledgeBase]:
             detail={"code": 1002, "message": "knowledge base not found", "data": {"knowledge_base_id": knowledge_base_id}},
         )
     return ApiResponse(data=kb)
+
+
+@router.post("/{knowledge_base_id}/retrieve-test", response_model=ApiResponse[RetrieveTestData])
+def retrieve_test(knowledge_base_id: str, payload: RetrieveTestRequest) -> ApiResponse[RetrieveTestData]:
+    kb = knowledge_base_service.get_knowledge_base(knowledge_base_id)
+    if kb is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": 1002, "message": "knowledge base not found", "data": {"knowledge_base_id": knowledge_base_id}},
+        )
+    if payload.top_k > payload.top_n:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": 1001, "message": "top_k must be <= top_n", "data": {"top_n": payload.top_n, "top_k": payload.top_k}},
+        )
+
+    try:
+        file_paths = knowledge_base_service.get_file_paths(knowledge_base_id)
+        initial, final, all_chunks = retrieval_service.retrieve(
+            kb=kb,
+            file_paths=file_paths,
+            query=payload.query,
+            mode=payload.mode,
+            top_n=payload.top_n,
+            top_k=payload.top_k,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"code": 3001, "message": "retrieve test failed", "data": {"error": str(exc)}},
+        )
+
+    # Persist detail cache for both right panel and middle citation popups.
+    knowledge_base_service.set_chunk_details(knowledge_base_id=knowledge_base_id, chunks=all_chunks)
+
+    return ApiResponse(data=RetrieveTestData(query=payload.query, initial_results=initial, final_results=final))

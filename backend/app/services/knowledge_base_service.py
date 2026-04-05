@@ -10,6 +10,8 @@ class KnowledgeBaseService:
         self._kbs: dict[str, KnowledgeBase] = {}
         self._file_paths: dict[str, str] = {}
         self._task_results: dict[str, dict[str, int]] = {}
+        self._chunk_details: dict[str, dict[str, str | float]] = {}
+        self._kb_chunk_ids: dict[str, set[str]] = {}
 
     def create_knowledge_base(
         self,
@@ -71,6 +73,25 @@ class KnowledgeBaseService:
     def get_task_result(self, task_id: str) -> Optional[dict[str, int]]:
         return self._task_results.get(task_id)
 
+    def set_chunk_details(self, knowledge_base_id: str, chunks: list[dict[str, str | float]]) -> None:
+        existing = self._kb_chunk_ids.get(knowledge_base_id, set())
+        for chunk_id in existing:
+            self._chunk_details.pop(chunk_id, None)
+        next_ids: set[str] = set()
+        for item in chunks:
+            chunk_id = str(item["chunk_id"])
+            self._chunk_details[chunk_id] = item
+            next_ids.add(chunk_id)
+        self._kb_chunk_ids[knowledge_base_id] = next_ids
+
+    def get_chunk_detail(self, chunk_id: str) -> Optional[dict[str, str | float]]:
+        return self._chunk_details.get(chunk_id)
+
+    def get_chunk_detail_in_kb(self, knowledge_base_id: str, chunk_id: str) -> Optional[dict[str, str | float]]:
+        if chunk_id not in self._kb_chunk_ids.get(knowledge_base_id, set()):
+            return None
+        return self._chunk_details.get(chunk_id)
+
     def set_knowledge_base_status(self, knowledge_base_id: str, status: str) -> None:
         kb = self._kbs.get(knowledge_base_id)
         if kb is None:
@@ -122,6 +143,9 @@ class KnowledgeBaseService:
             return False
         for item in kb.files:
             self._file_paths.pop(item.id, None)
+        for chunk_id in self._kb_chunk_ids.get(knowledge_base_id, set()):
+            self._chunk_details.pop(chunk_id, None)
+        self._kb_chunk_ids.pop(knowledge_base_id, None)
         del self._kbs[knowledge_base_id]
         return True
 
