@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     rrf_bm25_weight: float = Field(default=0.5, gt=0.0, lt=1.0)
     # JSON string, e.g. {".pdf":{"vector":0.35,"bm25":0.65},".md":{"vector":0.7,"bm25":0.3}}
     rrf_file_type_weights_json: str = ""
+    # Chat history memory window controls (turn = user + assistant).
+    history_turns_limit: int = Field(default=8, ge=1, le=50)
+    history_max_chars: int = Field(default=1200, ge=200, le=8000)
     # MySQL config for session persistence migration.
     # Prefer MYSQL_* variables; keep legacy host/user/password/database compatibility.
     mysql_host: str = Field(default="127.0.0.1", validation_alias=AliasChoices("MYSQL_HOST", "host"))

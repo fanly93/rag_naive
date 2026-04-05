@@ -21,6 +21,15 @@ def _sse_event(event: str, payload: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def _load_history_for_llm(session_id: str) -> list[dict[str, object]]:
+    """Load persisted session history before appending current user query."""
+    history = message_service.list_messages(session_id=session_id)
+    return [
+        {"role": item.role, "content": item.content, "is_error": item.is_error}
+        for item in history
+    ]
+
+
 @router.post("/completions", response_model=ApiResponse[ChatCompletionData])
 def chat_completions(payload: ChatCompletionRequest) -> ApiResponse[ChatCompletionData]:
     if not session_service.session_exists(payload.session_id):
@@ -33,6 +42,8 @@ def chat_completions(payload: ChatCompletionRequest) -> ApiResponse[ChatCompleti
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": 1001, "message": "top_k must be <= top_n", "data": {"top_n": payload.top_n, "top_k": payload.top_k}},
         )
+
+    history_messages = _load_history_for_llm(payload.session_id)
 
     session_service.touch_by_query(session_id=payload.session_id, query=payload.query)
 
@@ -102,6 +113,7 @@ def chat_completions(payload: ChatCompletionRequest) -> ApiResponse[ChatCompleti
         answer, provider, model = chat_service.complete(
             query=payload.query,
             context_chunks=context_chunks,
+            history_messages=history_messages,
             provider=payload.provider,
             model=payload.model,
         )
@@ -183,6 +195,8 @@ def chat_completions_stream(payload: ChatCompletionRequest) -> StreamingResponse
             detail={"code": 1001, "message": "top_k must be <= top_n", "data": {"top_n": payload.top_n, "top_k": payload.top_k}},
         )
 
+    history_messages = _load_history_for_llm(payload.session_id)
+
     session_service.touch_by_query(session_id=payload.session_id, query=payload.query)
 
     user_message = message_service.append_message(
@@ -252,6 +266,7 @@ def chat_completions_stream(payload: ChatCompletionRequest) -> StreamingResponse
         stream_iter, provider, model = chat_service.stream_complete(
             query=payload.query,
             context_chunks=context_chunks,
+            history_messages=history_messages,
             provider=payload.provider,
             model=payload.model,
         )

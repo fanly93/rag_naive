@@ -14,6 +14,8 @@ ChatProvider = Literal["deepseek", "openai", "dashscope"]
 class ChatService:
     def __init__(self) -> None:
         self._settings = get_settings()
+        self._history_turns_limit = self._settings.history_turns_limit
+        self._history_chars_per_message = self._settings.history_max_chars
 
     def _default_provider(self) -> ChatProvider:
         provider = self._settings.default_chat_provider.strip().lower()
@@ -41,25 +43,63 @@ class ChatService:
             self._settings.dashscope_chat_model,
         )
 
-    def _build_messages(self, query: str, context_blocks: list[str]) -> list[dict[str, str]]:
-        if not context_blocks:
-            return [
-                {
-                    "role": "system",
-                    "content": "你是RAG问答助手。请直接、准确回答用户问题，若不确定请明确说明。",
-                },
-                {"role": "user", "content": query},
-            ]
-        joined_context = "\n\n".join(context_blocks)
-        return [
+    def _truncate_text(self, text: str, max_chars: int) -> str:
+        normalized = " ".join(text.split()).strip()
+        if len(normalized) <= max_chars:
+            return normalized
+        return f"{normalized[:max_chars]}..."
+
+    def _build_history_messages(
+        self,
+        history_messages: list[dict[str, object]] | None,
+    ) -> list[dict[str, str]]:
+        if not history_messages:
+            return []
+
+        valid: list[dict[str, str]] = []
+        for item in history_messages:
+            role = str(item.get("role", "")).strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            if bool(item.get("is_error", False)):
+                continue
+            content = item.get("content")
+            if not isinstance(content, str):
+                continue
+            text = self._truncate_text(content, self._history_chars_per_message)
+            if not text:
+                continue
+            valid.append({"role": role, "content": text})
+
+        keep = self._history_turns_limit * 2
+        if len(valid) <= keep:
+            return valid
+        return valid[-keep:]
+
+    def _build_messages(
+        self,
+        query: str,
+        context_blocks: list[str],
+        history_messages: list[dict[str, object]] | None = None,
+    ) -> list[dict[str, str]]:
+        context_aware_system = (
+            "你是RAG问答助手。请严格基于提供的知识片段回答。"
+            "当引用片段时，使用 [1][2][3] 这样的引用编号标记。"
+            "如果片段信息不足，请明确告知。"
+        )
+        plain_system = "你是RAG问答助手。请直接、准确回答用户问题，若不确定请明确说明。"
+        messages: list[dict[str, str]] = [
             {
                 "role": "system",
-                "content": (
-                    "你是RAG问答助手。请严格基于提供的知识片段回答。"
-                    "当引用片段时，使用 [1][2][3] 这样的引用编号标记。"
-                    "如果片段信息不足，请明确告知。"
-                ),
-            },
+                "content": context_aware_system if context_blocks else plain_system,
+            }
+        ]
+        messages.extend(self._build_history_messages(history_messages))
+        if not context_blocks:
+            messages.append({"role": "user", "content": query})
+            return messages
+        joined_context = "\n\n".join(context_blocks)
+        messages.append(
             {
                 "role": "user",
                 "content": (
@@ -67,8 +107,9 @@ class ChatService:
                     f"知识片段：\n{joined_context}\n\n"
                     "请输出简洁中文回答，并在对应句子后标注引用编号。"
                 ),
-            },
-        ]
+            }
+        )
+        return messages
 
     def _extract_content_text(self, content: object) -> str:
         if isinstance(content, str):
@@ -87,6 +128,7 @@ class ChatService:
         self,
         query: str,
         context_chunks: list[tuple[int, str]],
+        history_messages: list[dict[str, object]] | None = None,
         provider: ChatProvider | None = None,
         model: str | None = None,
     ) -> tuple[str, ChatProvider, str]:
@@ -103,7 +145,11 @@ class ChatService:
         context_blocks = [f"[{index}] {content}" for index, content in context_chunks]
         payload = {
             "model": selected_model,
-            "messages": self._build_messages(query=query, context_blocks=context_blocks),
+            "messages": self._build_messages(
+                query=query,
+                context_blocks=context_blocks,
+                history_messages=history_messages,
+            ),
             "temperature": 0.2,
         }
         endpoint = f"{base_url.rstrip('/')}/chat/completions"
@@ -128,6 +174,7 @@ class ChatService:
         self,
         query: str,
         context_chunks: list[tuple[int, str]],
+        history_messages: list[dict[str, object]] | None = None,
         provider: ChatProvider | None = None,
         model: str | None = None,
     ) -> tuple[Iterator[str], ChatProvider, str]:
@@ -144,7 +191,11 @@ class ChatService:
         context_blocks = [f"[{index}] {content}" for index, content in context_chunks]
         payload = {
             "model": selected_model,
-            "messages": self._build_messages(query=query, context_blocks=context_blocks),
+            "messages": self._build_messages(
+                query=query,
+                context_blocks=context_blocks,
+                history_messages=history_messages,
+            ),
             "temperature": 0.2,
             "stream": True,
         }

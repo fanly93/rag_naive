@@ -39,11 +39,13 @@ def main() -> None:
 
     original_complete = chat_service.complete
     original_stream_complete = chat_service.stream_complete
+    complete_calls: list[dict[str, object]] = []
 
-    def fake_complete(**_: object) -> tuple[str, str, str]:
+    def fake_complete(**kwargs: object) -> tuple[str, str, str]:
+        complete_calls.append(dict(kwargs))
         return "这是回归脚本返回的测试回答 [1]", "deepseek", "deepseek-chat"
 
-    def fake_stream_complete(**_: object):
+    def fake_stream_complete(**kwargs: object):
         def gen():
             yield "这是"
             yield "流式"
@@ -187,11 +189,96 @@ def main() -> None:
             finally:
                 chat_service.stream_complete = current_stream  # type: ignore[assignment]
 
+        def case_chat_completion_multiturn_history() -> None:
+            complete_calls.clear()
+            created_local = client.post("/api/v1/sessions", json={"title": "phase6-memory"})
+            assert created_local.status_code == 201, created_local.text
+            local_session = created_local.json()["data"]["id"]
+
+            first = client.post(
+                "/api/v1/chat/completions",
+                json={
+                    "session_id": local_session,
+                    "query": "第一轮用户问题",
+                    "mode": "none",
+                    "top_n": 5,
+                    "top_k": 3,
+                },
+            )
+            assert first.status_code == 200, first.text
+
+            second = client.post(
+                "/api/v1/chat/completions",
+                json={
+                    "session_id": local_session,
+                    "query": "第二轮用户问题",
+                    "mode": "none",
+                    "top_n": 5,
+                    "top_k": 3,
+                },
+            )
+            assert second.status_code == 200, second.text
+            assert len(complete_calls) >= 2
+            second_call = complete_calls[-1]
+            history_messages = second_call.get("history_messages")
+            assert isinstance(history_messages, list)
+            assert any(
+                isinstance(item, dict) and item.get("content") == "第一轮用户问题"
+                for item in history_messages
+            )
+            assert any(
+                isinstance(item, dict) and "测试回答" in str(item.get("content", ""))
+                for item in history_messages
+            )
+
+        def case_chat_completion_session_isolation() -> None:
+            complete_calls.clear()
+            created_a = client.post("/api/v1/sessions", json={"title": "phase6-iso-a"})
+            created_b = client.post("/api/v1/sessions", json={"title": "phase6-iso-b"})
+            assert created_a.status_code == 201, created_a.text
+            assert created_b.status_code == 201, created_b.text
+            session_a = created_a.json()["data"]["id"]
+            session_b = created_b.json()["data"]["id"]
+
+            resp_a = client.post(
+                "/api/v1/chat/completions",
+                json={
+                    "session_id": session_a,
+                    "query": "这是A会话的问题",
+                    "mode": "none",
+                    "top_n": 5,
+                    "top_k": 3,
+                },
+            )
+            assert resp_a.status_code == 200, resp_a.text
+
+            resp_b = client.post(
+                "/api/v1/chat/completions",
+                json={
+                    "session_id": session_b,
+                    "query": "这是B会话的问题",
+                    "mode": "none",
+                    "top_n": 5,
+                    "top_k": 3,
+                },
+            )
+            assert resp_b.status_code == 200, resp_b.text
+            assert len(complete_calls) >= 2
+            b_history = complete_calls[-1].get("history_messages")
+            assert isinstance(b_history, list)
+            assert not any(
+                isinstance(item, dict) and "A会话" in str(item.get("content", ""))
+                for item in b_history
+            )
+            assert len(b_history) == 0
+
         for name, fn in [
             ("chat/completions 正常返回", case_chat_completion_mode_none),
             ("chat/completions 参数越界拦截", case_chat_completion_invalid_topk),
             ("chat/completions 会话不存在", case_chat_completion_missing_session),
             ("chat/completions 缺少知识库拦截", case_chat_completion_mode_requires_kb),
+            ("chat/completions 多轮历史注入", case_chat_completion_multiturn_history),
+            ("chat/completions 会话历史隔离", case_chat_completion_session_isolation),
             ("chat/completions/stream SSE事件流", case_chat_stream_sse),
             ("chat/completions/stream 参数越界拦截", case_chat_stream_invalid_topk),
             ("chat/completions/stream 缺少知识库拦截", case_chat_stream_mode_requires_kb),
